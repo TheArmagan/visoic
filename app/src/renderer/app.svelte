@@ -11,7 +11,23 @@
     {
       name: "Home",
       to: "/",
-    }
+    },
+    {
+      name: "Audio",
+      to: "/audio-sources",
+    },
+    {
+      name: "Values",
+      to: "/value-bindings",
+    },
+    {
+      name: "Monitor",
+      to: "/value-monitor",
+    },
+    {
+      name: "Shaders",
+      to: "/shader-editor",
+    },
   ];
 </script>
 

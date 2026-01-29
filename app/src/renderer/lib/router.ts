@@ -2,6 +2,10 @@ import type { Component } from 'svelte';
 import { get, writable } from 'svelte/store';
 
 import HomePage from '$lib/pages/home.svelte';
+import AudioSourcesPage from '$lib/pages/audio-sources.svelte';
+import ValueBindingsPage from '$lib/pages/value-bindings.svelte';
+import ValueMonitorPage from '$lib/pages/value-monitor.svelte';
+import ShaderEditorPage from '$lib/pages/shader-editor.svelte';
 
 export type RouterState = {
   routes: Record<string, Component>;
@@ -14,7 +18,11 @@ export type RouterState = {
 
 const initial: RouterState = {
   routes: {
-    '/': HomePage
+    '/': HomePage,
+    '/audio-sources': AudioSourcesPage,
+    '/value-bindings': ValueBindingsPage,
+    '/value-monitor': ValueMonitorPage,
+    '/shader-editor': ShaderEditorPage,
   },
   currentPage: {
     path: '/',
@@ -62,7 +70,7 @@ window.location.hash = window.location.hash.replace(/^#/, "") || get(router).cur
 window.addEventListener('hashchange', onHashChange);
 onHashChange();
 
-export function navigateTo(path: string, query: Record<string, string> = {}) {
+export function navigate(path: string, query: Record<string, string> = {}) {
   const queryString = Object.entries(query)
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
@@ -76,5 +84,5 @@ export function changeQuery(newQuery: Record<string, string>) {
     currentPath = state.currentPage.path;
     return state;
   });
-  navigateTo(currentPath, newQuery);
+  navigate(currentPath, newQuery);
 }
