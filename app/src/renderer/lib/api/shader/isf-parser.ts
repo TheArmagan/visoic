@@ -391,8 +391,10 @@ export class ISFParser {
 
     const metadataString = source.substring(startIndex + 2, endIndex).trim();
 
+    let metadata: ISFMetadata | null = null;
+
     try {
-      return JSON.parse(metadataString);
+      metadata = JSON.parse(metadataString);
     } catch {
       // Try to fix common JSON issues
       try {
@@ -400,11 +402,29 @@ export class ISFParser {
           .replace(/,\s*}/g, '}')
           .replace(/,\s*]/g, ']')
           .replace(/'/g, '"');
-        return JSON.parse(fixed);
+        metadata = JSON.parse(fixed);
       } catch {
         return null;
       }
     }
+
+    // Inject BUILTIN_SPEED
+    if (metadata) {
+      if (!metadata.INPUTS) metadata.INPUTS = [];
+      const hasSpeed = metadata.INPUTS.some((i: any) => i.NAME === 'BUILTIN_SPEED');
+      if (!hasSpeed) {
+        metadata.INPUTS.push({
+          NAME: 'BUILTIN_SPEED',
+          TYPE: 'float',
+          DEFAULT: 1.0,
+          MIN: 0.0,
+          MAX: 5.0,
+          LABEL: 'Speed'
+        });
+      }
+    }
+
+    return metadata;
   }
 
   /**
@@ -461,7 +481,7 @@ export class ISFParser {
     uniformStruct += '  passIndex: f32,\n';
     uniformStruct += '  frameIndex: f32,\n';
     uniformStruct += '  layerOpacity: f32,\n';
-    uniformStruct += '  _pad0: f32,\n';
+    uniformStruct += '  speed: f32,\n';
     uniformStruct += '  date: vec4<f32>,\n';
 
     // Add user inputs to uniform struct
@@ -619,6 +639,7 @@ fn RENDERSIZE() -> vec2<f32> { return uniforms.renderSize; }
 fn PASSINDEX() -> i32 { return i32(uniforms.passIndex); }
 fn FRAMEINDEX() -> i32 { return i32(uniforms.frameIndex); }
 fn DATE() -> vec4<f32> { return uniforms.date; }
+fn SPEED() -> f32 { return uniforms.speed; }
 
 fn PASSINDEX_F32() -> f32 { return uniforms.passIndex; }
 fn FRAMEINDEX_F32() -> f32 { return uniforms.frameIndex; }
@@ -726,7 +747,7 @@ ${convertedMain}
     wgsl = wgsl.replace(/^\s*(uniform|varying|attribute)\b.*$/gm, (_m, kind) => `// (removed ${kind} decl)`);
 
     // Remove preprocessor directives (not supported in WGSL)
-    wgsl = wgsl.replace(/^\s*#define\s+.*$/gm, '// (removed #define)');
+    wgsl = wgsl.replace(/^\s*#define\s+.*$/gm, '// (removed #define ...)');
     wgsl = wgsl.replace(/^\s*#if\s+.*$/gm, '// (removed #if)');
     wgsl = wgsl.replace(/^\s*#ifdef\s+.*$/gm, '// (removed #ifdef)');
     wgsl = wgsl.replace(/^\s*#ifndef\s+.*$/gm, '// (removed #ifndef)');
@@ -740,6 +761,10 @@ ${convertedMain}
     wgsl = wgsl.replace(/^\s*#line\s+.*$/gm, '// (removed #line)');
     wgsl = wgsl.replace(/^\s*#error\s+.*$/gm, '// (removed #error)');
     wgsl = wgsl.replace(/^\s*precision\s+.*$/gm, '// (removed precision)');
+
+    // Remove GLSL OUT macro usage (common pattern for out parameters in function calls)
+    // GLSL: func(a, b, OUT t) -> WGSL: func(a, b, t)
+    wgsl = wgsl.replace(/\bOUT\s+(\w+)/g, '$1');
 
     // Remove GLSL function forward declarations (prototypes)
     // WGSL doesn't support forward declarations - functions can be called before definition
@@ -850,6 +875,8 @@ ${convertedMain}
     wgsl = wgsl.replace(/\bpow\s*\(/g, 'pow(');
     wgsl = wgsl.replace(/\bexp\s*\(/g, 'exp(');
     wgsl = wgsl.replace(/\blog\s*\(/g, 'log(');
+    // Handle both direct calls and parenthesized macro expansions like (inversesqrt)(x)
+    wgsl = wgsl.replace(/\(inversesqrt\)\s*\(/g, 'inverseSqrt(');
     wgsl = wgsl.replace(/\binversesqrt\s*\(/g, 'inverseSqrt(');
     wgsl = wgsl.replace(/\bsqrt\s*\(/g, 'sqrt(');
     wgsl = wgsl.replace(/\blength\s*\(/g, 'length(');
@@ -974,6 +1001,10 @@ ${convertedMain}
     // Convert: vec * (-mat) -> -(vec * mat)
     wgsl = this.fixMatrixNegation(wgsl);
 
+    // Fix out/inout parameters (convert to pointers)
+    // This must run before clamp fixes, as pointers might change text structure
+    wgsl = this.fixOutParameters(wgsl);
+
     // Fix clamp() calls with scalar min/max on vectors
     // WGSL requires: clamp(vec4, vec4, vec4), not clamp(vec4, scalar, scalar)
     wgsl = this.fixClampCalls(wgsl);
@@ -985,6 +1016,10 @@ ${convertedMain}
     // Fix max() and min() calls with vector and scalar arguments
     // WGSL requires: max(vec3, vec3), not max(vec3, scalar)
     wgsl = this.fixMaxMinCalls(wgsl);
+
+    // Fix matrix division by scalar
+    // WGSL doesn't support mat / scalar, convert to mat * (1.0 / scalar)
+    wgsl = this.fixMatrixDivision(wgsl);
 
     // Fix C-style array declarations
     // vec4<f32> arr[9]; -> var arr: array<vec4<f32>, 9>;
@@ -1203,12 +1238,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
       // Use a unique parameter name that won't be replaced by fragCoord->... substitution
       const safeFragCoordParam = '_mainImage_fragCoord';
+      const safeFragCoordParamIn = '_mainImage_fragCoord_in';
 
       // Replace the function declaration with pointer version
       // Use safe parameter name to avoid later fragCoord replacement affecting it
       result = result.replace(
         mainImageRegex,
-        `fn mainImage(${fragColorName}_ptr: ptr<function, vec4<f32>>, ${safeFragCoordParam}: vec2<f32>) {\n  var ${fragColorName} = *${fragColorName}_ptr;`
+        `fn mainImage(${fragColorName}_ptr: ptr<function, vec4<f32>>, ${safeFragCoordParamIn}: vec2<f32>) {\n  var ${fragColorName} = *${fragColorName}_ptr;\n  var ${safeFragCoordParam} = ${safeFragCoordParamIn};`
       );
 
       // Replace uses of original fragCoord name inside mainImage body with the safe parameter name
@@ -1316,10 +1352,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       // Build WGSL function declaration
       const wgslReturnType = typeMap[returnType] || 'f32';
 
-      // Create local variable copies for mutable parameters
-      // WGSL function parameters are immutable, so we need local copies
-      // Use _local_ prefix to avoid collision with uniform names
-      const localVarDecls = mutableParams.map(p => `  var ${p.name}: ${p.type} = ${p.name}_in;`).join('\n');
+      // Create local variable copies for mutable parameters (ONLY for non-pointers)
+      // For pointers (converted from out/inout), we don't create local copies here,
+      // we handle them in fixOutParameters via dereferencing.
+
+      const localVarDecls = mutableParams
+        .filter(p => !p.isPointer)
+        .map(p => `  var ${p.name}: ${p.type} = ${p.name}_in;`)
+        .join('\n');
+
       const bodyPrefix = localVarDecls ? '\n' + localVarDecls : '';
 
       if (wgslReturnType === 'void') {
@@ -1335,17 +1376,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
    * GLSL: float x, vec2 y, in vec3 z
    * WGSL: x: f32, y: vec2<f32>, z: vec3<f32>
    * 
-   * Returns: { params: string, mutableParams: Array<{name: string, type: string}> }
+   * Returns: { params: string, mutableParams: Array<{name: string, type: string, isPointer: boolean}> }
    * mutableParams contains parameters that need local copies in the function body
    */
-  private convertFunctionParams(params: string, typeMap: Record<string, string>): { params: string; mutableParams: Array<{ name: string, type: string }> } {
+  private convertFunctionParams(params: string, typeMap: Record<string, string>): { params: string; mutableParams: Array<{ name: string, type: string, isPointer: boolean }> } {
     if (!params.trim()) return { params: '', mutableParams: [] };
 
     const paramList = params.split(',').map(p => p.trim()).filter(p => p);
     const typePattern = 'void|float|int|bool|vec2|vec3|vec4|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|mat2|mat3|mat4';
-    const mutableParams: Array<{ name: string, type: string }> = [];
+    const mutableParams: Array<{ name: string, type: string, isPointer: boolean }> = [];
 
     const converted = paramList.map(param => {
+      // Check for out/inout BEFORE removing qualifiers
+      const isOut = /\bout\b/.test(param);
+      const isInOut = /\binout\b/.test(param);
+      const isPointer = isOut || isInOut;
+
       // Remove in/out/inout qualifiers
       param = param.replace(/\b(in|out|inout)\s+/g, '');
 
@@ -1355,10 +1401,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (match) {
         const [, type, name] = match;
         const wgslType = typeMap[type] || 'f32';
-        // Mark all non-const parameters as potentially mutable
-        mutableParams.push({ name, type: wgslType });
-        // Rename parameter to _in suffix, we'll create local copy in body
-        return `${name}_in: ${wgslType}`;
+
+        if (isPointer) {
+          // For pointers, we pass ptr<function, T>
+          // We keep the original name (no _in suffix) because we will replace usages with (*name)
+          mutableParams.push({ name, type: wgslType, isPointer: true });
+          return `${name}: ptr<function, ${wgslType}>`;
+        } else {
+          // Mark all non-const parameters as potentially mutable
+          mutableParams.push({ name, type: wgslType, isPointer: false });
+          // Rename parameter to _in suffix, we'll create local copy in body
+          return `${name}_in: ${wgslType}`;
+        }
       }
 
       // If we couldn't parse it, return as-is (might cause errors but better than losing it)
@@ -1701,6 +1755,143 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   /**
+   * Fix out/inout parameters (convert to pointers)
+   * This handles dereferencing in function bodies and taking addresses in function calls.
+   */
+  private fixOutParameters(code: string): string {
+    let result = code;
+
+    // 1. Identify functions with pointer params
+    const ptrFuncs = new Map<string, Array<{ name: string, index: number }>>();
+
+    const fnDefPattern = /fn\s+(\w+)\s*\(([^)]*)\)/g;
+    let match;
+    while ((match = fnDefPattern.exec(result)) !== null) {
+      const funcName = match[1];
+      const paramsStr = match[2];
+      const params = this.splitByTopLevelComma(paramsStr);
+
+      const ptrs: Array<{ name: string, index: number }> = [];
+      params.forEach((p, i) => {
+        if (p.includes('ptr<function')) {
+          const nameMatch = p.trim().match(/^(\w+)\s*:/);
+          if (nameMatch) {
+            ptrs.push({ name: nameMatch[1], index: i });
+          }
+        }
+      });
+
+      if (ptrs.length > 0) {
+        ptrFuncs.set(funcName, ptrs);
+      }
+    }
+
+    // 2. Fix function bodies (dereference pointers)
+    const funcsToFix = Array.from(ptrFuncs.keys());
+
+    for (const funcName of funcsToFix) {
+      const ptrs = ptrFuncs.get(funcName)!;
+
+      // Regex to find function definitions
+      const defRegex = new RegExp(`fn\\s+${funcName}\\s*\\([^)]*\\)(?:\\s*->\\s*[^\\{]+)?\\s*\\{`, 'g');
+      const defMatches: any[] = [];
+      let m;
+      while ((m = defRegex.exec(result)) !== null) {
+        defMatches.push(m);
+      }
+
+      // Process definitions in reverse
+      for (let i = defMatches.length - 1; i >= 0; i--) {
+        const defMatch = defMatches[i];
+        const bodyStart = defMatch.index + defMatch[0].length; // After '{'
+
+        // Find matching closing brace
+        let depth = 1;
+        let bodyEnd = -1;
+        for (let k = bodyStart; k < result.length; k++) {
+          if (result[k] === '{') depth++;
+          else if (result[k] === '}') {
+            depth--;
+            if (depth === 0) {
+              bodyEnd = k;
+              break;
+            }
+          }
+        }
+
+        if (bodyEnd === -1) continue;
+
+        let body = result.slice(bodyStart, bodyEnd);
+
+        // Replace parameter usages with deference
+        for (const ptr of ptrs) {
+          const ptrName = ptr.name;
+          // Matches "name" NOT preceded by `*` or `&` or `.` and NOT followed by `:`
+          const usageRegex = new RegExp(`([\\*&\\.]?)\\b${ptrName}\\b(:?)`, 'g');
+          body = body.replace(usageRegex, (m, prefix, suffix) => {
+            if (prefix || suffix) return m;
+            return `(*${ptrName})`;
+          });
+        }
+
+        result = result.slice(0, bodyStart) + body + result.slice(bodyEnd);
+      }
+    }
+
+    // 3. Fix function calls (pass address)
+    const calls: Array<{ funcName: string, start: number, argsStart: number, endIndex: number, args: string[] }> = [];
+
+    for (const [funcName, ptrs] of ptrFuncs.entries()) {
+      const callRegex = new RegExp(`\\b${funcName}\\s*\\(`, 'g');
+      let m;
+      while ((m = callRegex.exec(result)) !== null) {
+        // Check if it's a definition (skip)
+        const prefix = result.slice(Math.max(0, m.index - 8), m.index);
+        if (/\bfn\s+$/.test(prefix)) continue;
+
+        const argsStart = m.index + m[0].length;
+        const parsed = this.parseParenInvocationArgs(result, argsStart - 1);
+        if (parsed) {
+          calls.push({
+            funcName,
+            start: m.index,
+            argsStart,
+            endIndex: parsed.endIndex,
+            args: parsed.args
+          });
+        }
+      }
+    }
+
+    // Sort calls by start index descending
+    calls.sort((a, b) => b.start - a.start);
+
+    for (const call of calls) {
+      const ptrs = ptrFuncs.get(call.funcName)!;
+      const args = [...call.args]; // copy
+      let modified = false;
+
+      for (const ptr of ptrs) {
+        if (ptr.index < args.length) {
+          const arg = args[ptr.index].trim();
+          // Add address-of operator & if not already there
+          if (!arg.startsWith('&')) {
+            args[ptr.index] = `&${arg}`;
+            modified = true;
+          }
+        }
+      }
+
+      if (modified) {
+        const newArgs = args.join(', ');
+        result = result.slice(0, call.argsStart) + newArgs + result.slice(call.endIndex);
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Fix clamp() calls where a vector is clamped with scalar min/max values.
    * WGSL requires all arguments to be the same type.
    * clamp(vec4(...), 0.0, 1.0) -> clamp(vec4(...), vec4<f32>(0.0), vec4<f32>(1.0))
@@ -1720,6 +1911,102 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       varTypes.set(varName, varType);
     }
 
+    // Functions that take a vector and return a scalar.
+    // Functions like abs, sin, cos, etc. are component-wise and return vectors when given vectors.
+    const scalarReturningFuncs = ['dot', 'length', 'distance', 'determinant'];
+
+    const isScalarByVectorUsage = (expr: string): boolean => {
+      let hasVectorUsage = false;
+
+      // 1. Check variables
+      for (const [varName] of varTypes) {
+        // Look for occurrences of the variable
+        const varUsagePattern = new RegExp(`\\b${varName}\\b(\\.[xyzwrgba]+)?`, 'g');
+        let usageMatch;
+        while ((usageMatch = varUsagePattern.exec(expr)) !== null) {
+          const swizzle = usageMatch[1];
+          const matchStart = usageMatch.index;
+
+          // Single-component swizzle is scalar.
+          if (swizzle && swizzle.length === 2 && !/[xyzwrgba]{2,}/.test(swizzle)) { // .x is 2 chars
+            continue;
+          }
+
+          // Check if usage is inside a scalar-returning function call.
+          let insideScalarFunc = false;
+          // Simple reverse scan to count parens
+          const beforeMatch = expr.slice(0, matchStart);
+
+          for (const fn of scalarReturningFuncs) {
+            // Check if we are inside fn( ... )
+            // Find last occurrence of fn
+            const fnIdx = beforeMatch.lastIndexOf(fn);
+            if (fnIdx !== -1) {
+              // Check if parens balance after fn
+              const verifyRegion = beforeMatch.slice(fnIdx + fn.length);
+              let parenCount = 0;
+              let hasOpen = false;
+              for (const ch of verifyRegion) {
+                if (ch === '(') { parenCount++; hasOpen = true; }
+                else if (ch === ')') parenCount--;
+              }
+              if (hasOpen && parenCount > 0) {
+                insideScalarFunc = true;
+                break;
+              }
+            }
+          }
+
+          if (!insideScalarFunc) {
+            // Vector used outside scalar-returning function.
+            hasVectorUsage = true;
+            return false; // Found a vector context usage
+          }
+        }
+      }
+
+      // 2. Check explicitly constructed vectors: vec3(...), vec3<f32>(...)
+      const constructorPattern = /vec[234](?:<f32>)?\s*\(/g;
+      let cMatch;
+      while ((cMatch = constructorPattern.exec(expr)) !== null) {
+        const matchStart = cMatch.index;
+        // Check if inside scalar function
+        let insideScalarFunc = false;
+        const beforeMatch = expr.slice(0, matchStart);
+
+        for (const fn of scalarReturningFuncs) {
+          const fnIdx = beforeMatch.lastIndexOf(fn);
+          if (fnIdx !== -1) {
+            const verifyRegion = beforeMatch.slice(fnIdx + fn.length);
+            let parenCount = 0;
+            let hasOpen = false;
+            for (const ch of verifyRegion) {
+              if (ch === '(') { parenCount++; hasOpen = true; }
+              else if (ch === ')') parenCount--;
+            }
+            if (hasOpen && parenCount > 0) {
+              insideScalarFunc = true;
+              break;
+            }
+          }
+        }
+
+        if (!insideScalarFunc) {
+          hasVectorUsage = true;
+          return false;
+        }
+      }
+
+      // If we found any vector variables or constructors that were NOT used in scalar context, we returned false.
+      // If we are here, it means either:
+      // a) No vector variables/constructors found at all (assume scalar)
+      // b) All found were used in scalar context
+      // However, if we found NO vector var/constructors, but `vecType` was somehow inferred 
+      // (e.g. from a swizzle on a temp result we couldn't track), we should be careful.
+      // But for now, if we found no vector indicators, we treat as scalar.
+      return true;
+    };
+
     let result = code;
     let safety = 0;
     const maxIterations = 1000;
@@ -1732,7 +2019,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (!clampMatch || clampMatch.index === undefined) break;
 
       const clampStart = clampMatch.index;
-      const argsStart = clampStart + clampMatch[0].length;
 
       // Parse the arguments
       const parsed = this.parseParenInvocationArgs(result, clampStart + 'clamp'.length);
@@ -1744,48 +2030,59 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
       const [arg1, arg2, arg3] = parsed.args.map(a => a.trim());
 
-      // Check if arg2 and arg3 look like scalars (numbers)
+      // Check if bounds look like scalars
       const looksLikeScalar = (s: string) => {
         const trimmed = s.trim();
         // Is it a number? Match: 0, 0.0, .5, 0., 1.0f, -0.5, etc.
+        // Also simple expressions like 1.0/2.0 or -1.0
         if (/^-?\d*\.?\d*f?$/.test(trimmed) && /\d/.test(trimmed)) return true;
         return false;
       };
 
       // Detect vector type from first argument
-      // We need to find any vector type in the expression
       let vecType: string | null = null;
-
       const trimmedArg1 = arg1.trim();
 
-      // Check if expression CONTAINS a vector constructor (anywhere, not just at start)
-      // Priority: vec4 > vec3 > vec2 to get the most likely result type
-      // For expressions like "1.- vec3<f32>(val)", the result is vec3
-      if (trimmedArg1.includes('vec4<f32>') || trimmedArg1.match(/\bvec4\s*\(/)) {
-        vecType = 'vec4';
-      } else if (trimmedArg1.includes('vec3<f32>') || trimmedArg1.match(/\bvec3\s*\(/)) {
-        vecType = 'vec3';
-      } else if (trimmedArg1.includes('vec2<f32>') || trimmedArg1.match(/\bvec2\s*\(/)) {
-        vecType = 'vec2';
-      } else if (/^[a-zA-Z_]\w*$/.test(trimmedArg1)) {
-        // It's a simple variable name - check if we know its type
+      // Check constructor
+      if (trimmedArg1.includes('vec4<f32>') || trimmedArg1.match(/\bvec4\s*\(/)) vecType = 'vec4';
+      else if (trimmedArg1.includes('vec3<f32>') || trimmedArg1.match(/\bvec3\s*\(/)) vecType = 'vec3';
+      else if (trimmedArg1.includes('vec2<f32>') || trimmedArg1.match(/\bvec2\s*\(/)) vecType = 'vec2';
+      // Check variable
+      else if (/^[a-zA-Z_]\w*$/.test(trimmedArg1)) {
         const knownType = varTypes.get(trimmedArg1);
-        if (knownType) {
-          vecType = knownType;
-        }
+        if (knownType) vecType = knownType;
       }
 
-      // Check for swizzle patterns that indicate vector type
-      // e.g., "p - K.xxx" contains ".xxx" which is a vec3 swizzle
-      // Swizzle length determines vector size: .xy=vec2, .xyz/.rgb=vec3, .xyzw/.rgba=vec4
       if (!vecType) {
-        // Match swizzle patterns like .xyzw, .rgba, .xy, .xxx, etc.
+        // Infer from swizzles
         const swizzleMatches = trimmedArg1.match(/\.[xyzwrgba]{2,4}/g);
         if (swizzleMatches) {
-          // Find the longest swizzle to determine the result type
           let maxSwizzleLen = 0;
           for (const swizzle of swizzleMatches) {
-            maxSwizzleLen = Math.max(maxSwizzleLen, swizzle.length - 1); // -1 for the dot
+            // Check if swizzle is inside scalar function
+            let insideScalarFunc = false;
+            const idx = trimmedArg1.indexOf(swizzle);
+            const beforeMatch = trimmedArg1.slice(0, idx);
+            for (const fn of scalarReturningFuncs) {
+              const fnIdx = beforeMatch.lastIndexOf(fn);
+              if (fnIdx !== -1) {
+                const verifyRegion = beforeMatch.slice(fnIdx + fn.length);
+                let parenCount = 0;
+                let hasOpen = false;
+                for (const ch of verifyRegion) {
+                  if (ch === '(') { parenCount++; hasOpen = true; }
+                  else if (ch === ')') parenCount--;
+                }
+                if (hasOpen && parenCount > 0) {
+                  insideScalarFunc = true;
+                  break;
+                }
+              }
+            }
+
+            if (!insideScalarFunc) {
+              maxSwizzleLen = Math.max(maxSwizzleLen, swizzle.length - 1);
+            }
           }
           if (maxSwizzleLen === 4) vecType = 'vec4';
           else if (maxSwizzleLen === 3) vecType = 'vec3';
@@ -1793,39 +2090,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
       }
 
-      // Check if the expression contains a known vector variable (with possible operations)
+      // Fallback: Check if expression contains any vector variables NOT in scalar context
       if (!vecType) {
         for (const [varName, varType] of varTypes) {
-          // Check if the variable appears in the expression (as a word boundary)
-          const varRegex = new RegExp(`\\b${varName}\\b`);
-          if (varRegex.test(trimmedArg1)) {
+          if (trimmedArg1.includes(varName) && !isScalarByVectorUsage(trimmedArg1)) {
             vecType = varType;
             break;
           }
         }
       }
 
-      // Fallback: Check if the first token is a function call or expression with arithmetic
-      /*
-      // Removed: This is too aggressive and breaks scalar clamping (e.g. clamp(x * 2.0, 0.0, 1.0))
-      if (!vecType) {
-        const startsWithFunctionCall = /^[a-zA-Z_]\w*\s*\(/.test(trimmedArg1);
-        const hasArithmetic = /[*+\-\/]/.test(trimmedArg1);
-
-        if ((startsWithFunctionCall || hasArithmetic) && looksLikeScalar(arg2) && looksLikeScalar(arg3)) {
-          // Assume vec4 for function calls and expressions (most common for colors)
-          vecType = 'vec4';
-        }
+      // If we inferred a vector type, but the expression only uses vector vars/constructors in scalar contexts,
+      // treat it as scalar.
+      if (vecType && isScalarByVectorUsage(trimmedArg1)) {
+        vecType = null;
       }
-      */
 
       if (vecType && looksLikeScalar(arg2) && looksLikeScalar(arg3)) {
-        // Need to wrap scalars in vector constructors
         const wgslVecType = `${vecType}<f32>`;
         const newClamp = `clamp(${arg1}, ${wgslVecType}(${arg2}), ${wgslVecType}(${arg3}))`;
         result = result.slice(0, clampStart) + newClamp + result.slice(parsed.endIndex + 1);
       } else {
-        // Mark as processed
         result = result.slice(0, clampStart) + '__CLAMP_PROCESSED__' + result.slice(clampStart + 5);
       }
     }
@@ -2050,6 +2335,63 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   /**
+   * Fix matrix division by scalar.
+   * GLSL allows: mat2 / scalar
+   * WGSL doesn't support this operator, so convert to: mat2 * (1.0 / scalar)
+   */
+  private fixMatrixDivision(code: string): string {
+    let result = code;
+
+    // Pattern to match matrix constructor or variable followed by / scalar
+    // mat2x2<f32>(...) / expr  or  matVar / expr
+    // We need to handle:
+    // 1. mat2x2<f32>(...) / (expr)
+    // 2. matVar / (expr)
+    // 3. matVar / scalar
+
+    // First, find matrix variable declarations to know which variables are matrices
+    const matVars = new Set<string>();
+    const matDeclPattern = /var\s+(\w+)\s*:\s*(mat[234]x[234]<f32>)/g;
+    let match;
+    while ((match = matDeclPattern.exec(code)) !== null) {
+      matVars.add(match[1]);
+    }
+
+    // Handle matrix constructor divided by expression: mat2x2<f32>(...) / (expr)
+    // This pattern matches the matrix constructor followed by division
+    const matConstructorDivPattern = /(mat[234]x?[234]?<f32>\s*\([^)]*(?:\([^)]*\)[^)]*)*\))\s*\/\s*(\([^)]+\)|\w+(?:\.\w+)?(?:\s*[\*\+\-]\s*\w+(?:\.\w+)?)*)/g;
+
+    result = result.replace(matConstructorDivPattern, (match, matExpr, divisor) => {
+      // Convert mat / divisor to mat * (1.0 / divisor)
+      const cleanDivisor = divisor.trim();
+      // If divisor is already parenthesized, use it directly
+      if (cleanDivisor.startsWith('(')) {
+        return `${matExpr} * (1.0 / ${cleanDivisor})`;
+      } else {
+        return `${matExpr} * (1.0 / (${cleanDivisor}))`;
+      }
+    });
+
+    // Handle matrix variable divided by expression: matVar / (expr)
+    for (const matVar of matVars) {
+      const varDivPattern = new RegExp(
+        `\\b(${matVar})\\s*\\/\\s*(\\([^)]+\\)|\\w+(?:\\.\\w+)?(?:\\s*[\\*\\+\\-]\\s*\\w+(?:\\.\\w+)?)*)`,
+        'g'
+      );
+      result = result.replace(varDivPattern, (match, varName, divisor) => {
+        const cleanDivisor = divisor.trim();
+        if (cleanDivisor.startsWith('(')) {
+          return `${varName} * (1.0 / ${cleanDivisor})`;
+        } else {
+          return `${varName} * (1.0 / (${cleanDivisor}))`;
+        }
+      });
+    }
+
+    return result;
+  }
+
+  /**
    * Fix C-style array declarations.
    * Converts: Type name[Size]; -> var name: array<Type, Size>;
    */
@@ -2216,16 +2558,40 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         } else if (/f32\s*[<(]|^\s*\d+\./.test(args)) {
           targetDef = defs.find(d => d.paramType.includes('f32')) || targetDef;
         } else {
-          // Try to infer from context - look for variable declarations nearby
-          // Check if the argument is a simple identifier
-          const argName = args.split(',')[0].trim();
-          if (/^\w+$/.test(argName)) {
-            // Look for variable declaration of this argument
-            const varDeclPattern = new RegExp(`var\\s+${argName}\\s*:\\s*(\\w+)`);
+          // Try to infer from context - look for variable declarations
+          // First, extract the first argument (before the first comma at depth 0)
+          let firstArg = '';
+          let depth = 0;
+          for (const char of args) {
+            if (char === '(' || char === '[') depth++;
+            else if (char === ')' || char === ']') depth--;
+            else if (char === ',' && depth === 0) break;
+            firstArg += char;
+          }
+          firstArg = firstArg.trim();
+
+          // Extract all identifiers from the expression (e.g., "F+1.0" -> ["F"])
+          const identifiers = firstArg.match(/\b[a-zA-Z_]\w*\b/g) || [];
+
+          // Check each identifier for its declared type
+          for (const identifier of identifiers) {
+            // Skip common keywords/functions
+            if (['f32', 'i32', 'u32', 'vec2', 'vec3', 'vec4', 'mat2', 'mat3', 'mat4',
+              'sin', 'cos', 'tan', 'floor', 'ceil', 'abs', 'sqrt', 'pow', 'min', 'max',
+              'dot', 'cross', 'normalize', 'length', 'clamp', 'mix', 'step', 'smoothstep'].includes(identifier)) {
+              continue;
+            }
+
+            // Look for variable declaration of this identifier
+            const varDeclPattern = new RegExp(`var\\s+${identifier}\\s*:\\s*(\\w+)`);
             const varMatch = result.match(varDeclPattern);
             if (varMatch) {
               const varType = varMatch[1];
-              targetDef = defs.find(d => d.paramType.includes(varType)) || targetDef;
+              const matchingDef = defs.find(d => d.paramType.includes(varType));
+              if (matchingDef) {
+                targetDef = matchingDef;
+                break;
+              }
             }
           }
         }
@@ -2439,11 +2805,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         inFunction = true;
       }
 
-      // Track brace depth
+      // Count opening braces BEFORE checking if we should process
+      // This ensures we correctly identify function scope
+      let openBraces = 0;
+      let closeBraces = 0;
       for (const char of line) {
-        if (char === '{') braceDepth++;
-        if (char === '}') braceDepth--;
+        if (char === '{') openBraces++;
+        if (char === '}') closeBraces++;
       }
+
+      // Determine if this line is at module scope BEFORE we update braceDepth
+      // A line is at module scope if:
+      // 1. We're not in a function, AND
+      // 2. Current brace depth is 0, AND
+      // 3. The line doesn't open a new brace (or if it does, it's a function definition itself)
+      const isModuleScope = !inFunction && braceDepth === 0 && openBraces === 0;
+
+      // Update brace depth
+      braceDepth += openBraces - closeBraces;
 
       // If we're at brace depth 0 after processing, we're back at module scope
       if (braceDepth === 0) {
@@ -2451,7 +2830,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       }
 
       // Only process var declarations at module scope (not inside functions)
-      if (!inFunction && braceDepth === 0) {
+      if (isModuleScope) {
         // Check if this is a var declaration that references uniforms
         const varMatch = line.match(/^\s*var(?:<private>)?\s+(\w+)\s*:\s*([^=]+?)\s*=\s*(.+?)\s*;?\s*$/);
         if (varMatch && /uniforms\./.test(varMatch[3])) {
@@ -2526,17 +2905,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
    * Fix swizzle assignments - WGSL doesn't support assigning to swizzles like var.rgb = expr
    * Converts: var.rgb = expr; -> var = vec4<f32>(expr, var.a);
    * Converts: var.xyz = expr; -> var = vec4<f32>(expr, var.w);
+   * Converts: var.xy = expr; (for vec2) -> var = expr;
    * Also handles compound assignments: var.xy += expr; -> var = vec3<f32>(var.xy + expr, var.z);
    */
   private fixSwizzleAssignments(code: string): string {
     let result = code;
 
-    // First, collect variable types so we can detect vec3 vs vec4
+    // Collect variable types so we can detect vec2, vec3 vs vec4
     const varTypes = new Map<string, string>();
+
+    // Match var declarations
     const varDeclPattern = /var\s+(\w+)\s*:\s*(vec[234]<f32>)/g;
     let match;
     while ((match = varDeclPattern.exec(code)) !== null) {
       varTypes.set(match[1], match[2]);
+    }
+
+    // Also match function parameters (name: type or name_in: type)
+    const paramPattern = /(\w+)(?:_in)?\s*:\s*(vec[234]<f32>)/g;
+    while ((match = paramPattern.exec(code)) !== null) {
+      // Store both with and without _in suffix
+      const baseName = match[1].replace(/_in$/, '');
+      varTypes.set(match[1], match[2]);
+      varTypes.set(baseName, match[2]);
     }
 
     // Helper to get the remaining component for a vec3 after .xy
@@ -2546,13 +2937,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // Handle compound assignments first (+=, -=, *=, /=)
     // Pattern: identifier.xy += expression;
+    // Convert to: identifier = vec2<f32>(identifier.xy + expression); for vec2
     // Convert to: identifier = vec3<f32>(identifier.xy + expression, identifier.z); for vec3
     // Or: identifier = vec4<f32>(identifier.xy + expression, identifier.z, identifier.w); for vec4
     result = result.replace(
       /(\w+)\.xy\s*(\+|-|\*|\/)\s*=\s*([^;]+);/g,
       (match, varName, op, expr) => {
         const varType = varTypes.get(varName);
-        if (varType === 'vec3<f32>') {
+        if (varType === 'vec2<f32>') {
+          return `${varName} = ${varName}.xy ${op} (${expr.trim()});`;
+        } else if (varType === 'vec3<f32>') {
           return `${varName} = vec3<f32>(${varName}.xy ${op} (${expr.trim()}), ${getVec3Remaining(varName)});`;
         } else {
           // Assume vec4 or unknown
@@ -2659,12 +3053,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     );
 
     // Pattern: identifier.xy = expression;
-    // Check variable type to determine if vec3 or vec4
+    // Check variable type to determine if vec2, vec3 or vec4
     result = result.replace(
       /(\w+)\.xy\s*=\s*([^;]+);/g,
       (match, varName, expr) => {
         const varType = varTypes.get(varName);
-        if (varType === 'vec3<f32>') {
+        if (varType === 'vec2<f32>') {
+          // For vec2, .xy = expr is the same as var = expr
+          return `${varName} = ${expr.trim()};`;
+        } else if (varType === 'vec3<f32>') {
           return `${varName} = vec3<f32>(${expr.trim()}, ${varName}.z);`;
         } else {
           // Assume vec4 or unknown

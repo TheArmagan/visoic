@@ -15,6 +15,9 @@ export interface AudioDeviceInfo {
 }
 
 export interface AnalyzerConfig {
+  /** Optional ID for the analyzer. If not provided, one will be generated */
+  id?: string;
+
   /** FFT size - must be power of 2 between 32 and 32768 */
   fftSize: FFTSize;
 

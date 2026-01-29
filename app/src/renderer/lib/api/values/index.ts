@@ -3,7 +3,7 @@
 // ============================================
 
 // Core
-export { ValueManager, valueManager } from './value-manager';
+export { ValueManager, valueManager, updateFrameTiming } from './value-manager';
 export { audioBridge } from './audio-bridge';
 export { ConfigManager, configManager } from './config-manager';
 
@@ -36,6 +36,8 @@ export type {
   AudioValueSource,
   AudioExtraction,
   ComputedValueSource,
+  AccumulatorValueSource,
+  AccumulatorWrapMode,
 
   // Event types
   ValueEventType,
@@ -56,6 +58,7 @@ export type {
   AnalyzerConfig,
   BindingConfig,
   ComputedValueConfig,
+  AccumulatorValueConfig,
   AppConfig,
   // Shader config types
   UniformBindingConfig,

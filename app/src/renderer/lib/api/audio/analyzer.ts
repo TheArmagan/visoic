@@ -61,7 +61,7 @@ export class FFTAnalyzer {
     sourceNode: AudioNode,
     config: Partial<AnalyzerConfig> = {}
   ) {
-    this.id = generateAnalyzerId();
+    this.id = config.id ?? generateAnalyzerId();
     this.audioContext = audioContext;
     this.sourceNode = sourceNode;
     this.config = { ...DEFAULT_ANALYZER_CONFIG, ...config };

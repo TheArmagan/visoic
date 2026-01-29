@@ -1,5 +1,5 @@
 import { EventEmitter } from '../audio/event-emitter';
-import type { AudioExtraction } from './types';
+import type { AudioExtraction, AccumulatorWrapMode } from './types';
 import type { FFTSize } from '../audio/types';
 import type { BlendMode } from '../shader/types';
 
@@ -30,7 +30,17 @@ export interface ComputedValueConfig {
   id: string;
   name: string;
   expression: string;
-  dependencies: string[];
+}
+
+export interface AccumulatorValueConfig {
+  id: string;
+  name: string;
+  rateExpression: string;
+  limitExpression?: string;
+  minExpression?: string;
+  wrapMode: AccumulatorWrapMode;
+  initialValue: number;
+  resetOnLimit?: boolean;
 }
 
 // ============================================================================
@@ -129,6 +139,7 @@ export interface AppConfig {
   analyzers: AnalyzerConfig[];
   bindings: BindingConfig[];
   computedValues: ComputedValueConfig[];
+  accumulatorValues: AccumulatorValueConfig[];
   shader: ShaderConfig;
   settings: AppSettings;
 }
@@ -158,6 +169,7 @@ function createDefaultConfig(): AppConfig {
     analyzers: [],
     bindings: [],
     computedValues: [],
+    accumulatorValues: [],
     shader: {
       contexts: [],
     },
@@ -444,6 +456,50 @@ export class ConfigManager extends EventEmitter<ConfigEventMap> {
   }
 
   // --------------------------------------------------------------------------
+  // Accumulator Value Config
+  // --------------------------------------------------------------------------
+
+  /**
+   * Add accumulator value config
+   */
+  addAccumulatorValue(accumulator: AccumulatorValueConfig): void {
+    // Ensure accumulatorValues array exists (for migration from older configs)
+    if (!this.config.accumulatorValues) {
+      this.config.accumulatorValues = [];
+    }
+
+    const existing = this.config.accumulatorValues.findIndex(a => a.id === accumulator.id);
+
+    if (existing >= 0) {
+      this.config.accumulatorValues[existing] = accumulator;
+    } else {
+      this.config.accumulatorValues.push(accumulator);
+    }
+
+    this.emit('change', 'accumulatorValues', this.config.accumulatorValues);
+    this.scheduleSave();
+  }
+
+  /**
+   * Remove accumulator value config
+   */
+  removeAccumulatorValue(id: string): void {
+    if (!this.config.accumulatorValues) return;
+
+    this.config.accumulatorValues = this.config.accumulatorValues.filter(a => a.id !== id);
+
+    this.emit('change', 'accumulatorValues', this.config.accumulatorValues);
+    this.scheduleSave();
+  }
+
+  /**
+   * Get all accumulator value configs
+   */
+  getAccumulatorValues(): AccumulatorValueConfig[] {
+    return [...(this.config.accumulatorValues ?? [])];
+  }
+
+  // --------------------------------------------------------------------------
   // Shader Config
   // --------------------------------------------------------------------------
 
@@ -647,6 +703,7 @@ export class ConfigManager extends EventEmitter<ConfigEventMap> {
       analyzers: loaded.analyzers ?? defaults.analyzers,
       bindings: loaded.bindings ?? defaults.bindings,
       computedValues: loaded.computedValues ?? defaults.computedValues,
+      accumulatorValues: loaded.accumulatorValues ?? defaults.accumulatorValues,
       shader: loaded.shader ?? defaults.shader,
       settings: {
         ...defaults.settings,

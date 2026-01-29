@@ -81,6 +81,7 @@ class AudioValueBridge {
       for (const analyzerConfig of savedAnalyzers) {
         try {
           const handle = await audioManager.createAnalyzer({
+            id: analyzerConfig.id,  // Pass the saved ID to preserve it
             deviceId: analyzerConfig.deviceId,
             fftSize: analyzerConfig.fftSize,
             smoothingTimeConstant: analyzerConfig.smoothingTimeConstant,
@@ -89,36 +90,8 @@ class AudioValueBridge {
             normalizationEnabled: analyzerConfig.normalizationEnabled,
           });
 
-          // Always store with the handle's actual ID
+          // Store with the handle's ID (should match analyzerConfig.id)
           this.analyzerHandles.set(handle.id, handle);
-
-          // Update config with new handle ID if different
-          if (handle.id !== analyzerConfig.id) {
-            configManager.removeAnalyzer(analyzerConfig.id);
-            configManager.addAnalyzer({
-              ...analyzerConfig,
-              id: handle.id,
-            });
-
-            // Update bindings that reference the old analyzer ID (in memory)
-            for (const binding of savedBindings) {
-              if (binding.analyzerId === analyzerConfig.id) {
-                binding.analyzerId = handle.id;
-              }
-            }
-
-            // Update bindings in config as well
-            const configBindings = configManager.getBindings();
-            for (const binding of configBindings) {
-              if (binding.analyzerId === analyzerConfig.id) {
-                configManager.removeBinding(binding.valueId);
-                configManager.addBinding({
-                  ...binding,
-                  analyzerId: handle.id,
-                });
-              }
-            }
-          }
         } catch (error) {
           console.warn(`[AudioBridge] Failed to restore analyzer ${analyzerConfig.label}:`, error);
         }
@@ -156,12 +129,33 @@ class AudioValueBridge {
             computed.id,
             computed.name,
             computed.expression,
-            computed.dependencies,
             {},    // options
             true   // skipSave - already in config
           );
         } catch (error) {
           console.warn(`[AudioBridge] Failed to restore computed value ${computed.id}:`, error);
+        }
+      }
+
+      // Restore accumulator values
+      const savedAccumulators = configManager.getAccumulatorValues();
+      for (const acc of savedAccumulators) {
+        try {
+          valueManager.createAccumulator(
+            acc.id,
+            acc.name,
+            acc.rateExpression,
+            {
+              limitExpression: acc.limitExpression,
+              minExpression: acc.minExpression,
+              wrapMode: acc.wrapMode,
+              initialValue: acc.initialValue,
+              resetOnLimit: acc.resetOnLimit,
+            },
+            true   // skipSave - already in config
+          );
+        } catch (error) {
+          console.warn(`[AudioBridge] Failed to restore accumulator value ${acc.id}:`, error);
         }
       }
 

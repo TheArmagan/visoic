@@ -33,6 +33,9 @@ export class ShaderLayer extends EventEmitter<ShaderLayerEvents> {
   private uniforms: Map<string, UniformDefinition> = new Map();
   private textureInputs: Map<string, HTMLImageElement | HTMLVideoElement | HTMLCanvasElement | null> = new Map();
 
+  // Runtime state
+  accumulatedTime: number = 0;
+
   // GPU resources (will be set by RenderContext)
   pipeline: GPURenderPipeline | null = null;
   uniformBuffer: GPUBuffer | null = null;

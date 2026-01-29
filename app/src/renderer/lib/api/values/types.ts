@@ -102,6 +102,7 @@ export type ValueSourceType =
   | 'manual'      // User-set value
   | 'audio'       // From audio analyzer
   | 'computed'    // Calculated from other values
+  | 'accumulator' // Accumulated value with rate/limit
   | 'system'      // System values (time, etc.)
   | 'external';   // External input
 
@@ -167,6 +168,39 @@ export interface ComputedValueSource extends ValueSource {
 
   /** Value IDs this depends on */
   dependencies: string[];
+}
+
+export type AccumulatorWrapMode = 'clamp' | 'wrap' | 'pingpong' | 'none';
+
+export interface AccumulatorValueSource extends ValueSource {
+  type: 'accumulator';
+
+  /** Rate expression - can reference other values or be a constant */
+  rateExpression: string;
+
+  /** Rate dependencies - value IDs used in rateExpression */
+  rateDependencies: string[];
+
+  /** Limit expression - can reference other values or be a constant. Used for modulo when wrapMode is 'wrap' */
+  limitExpression?: string;
+
+  /** Limit dependencies - value IDs used in limitExpression */
+  limitDependencies?: string[];
+
+  /** What happens when reaching the limit */
+  wrapMode: AccumulatorWrapMode;
+
+  /** Minimum value (optional, used with clamp/pingpong) */
+  minExpression?: string;
+
+  /** Min dependencies */
+  minDependencies?: string[];
+
+  /** Initial value */
+  initialValue: number;
+
+  /** Whether to reset on limit hit (for non-wrap modes) */
+  resetOnLimit?: boolean;
 }
 
 // ============================================

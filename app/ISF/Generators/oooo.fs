@@ -33,9 +33,9 @@ partly inspired by "A Spiral of Circles" by knarkowicz ( https://www.shadertoy.c
 ///////////////////////////////////////////////////////////////////////////
 //=======================================================================//
 
-#define Frame float(iFrame)
-#define Time iTime
-#define PixelCount iResolution.xy
+#define Frame uniforms.frameIndex
+#define Time uniforms.time
+#define PixelCount uniforms.renderSize
 #define OUT
 
 #define rsqrt inversesqrt
@@ -356,7 +356,7 @@ vec3 EvalSceneCol(vec3 cpos, mat3 cam_mat, float focalLen, vec2 uv0)
     //return vec3(-r.w*10.0);
     //return vec3(1.0);
     
-    return col;
+    // return col;
 }
 
 

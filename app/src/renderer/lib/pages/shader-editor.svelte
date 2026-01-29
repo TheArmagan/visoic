@@ -242,6 +242,9 @@
       // Load saved config
       await loadSavedConfig();
 
+      // Start value manager loop (for accumulators and computed values)
+      valueManager.start();
+
       // Start sync loop for value bindings
       startSyncLoop();
 
@@ -251,14 +254,15 @@
     } finally {
       isLoading = false;
     }
-
-    // Cleanup on unmount
-    return () => {
-      stopSyncLoop();
-    };
   });
 
   onDestroy(() => {
+    // Stop sync loop
+    stopSyncLoop();
+
+    // Stop value manager loop
+    valueManager.stop();
+
     // Save config
     saveConfig();
 
@@ -1216,6 +1220,8 @@
                 uniform.binding.outputMax,
               );
               layer.setUniform(uniform.name, mapped);
+              // Update UI state to reflect live value
+              uniform.value = mapped;
             }
           }
 
@@ -1230,6 +1236,7 @@
 
             const newValue = padNumberArray(currentArray, 2, 0);
             const channels: Array<"x" | "y"> = ["x", "y"];
+            let changed = false;
 
             for (let i = 0; i < channels.length; i++) {
               const channelBinding = uniform.vec2Binding[channels[i]];
@@ -1243,11 +1250,15 @@
                     channelBinding.outputMin,
                     channelBinding.outputMax,
                   );
+                  changed = true;
                 }
               }
             }
 
-            layer.setUniform(uniform.name, newValue);
+            if (changed) {
+              layer.setUniform(uniform.name, newValue);
+              uniform.value = newValue;
+            }
           }
 
           // Handle vec3 bindings (non-color)
@@ -1258,6 +1269,7 @@
 
             const newValue = padNumberArray(currentArray, 3, 0);
             const channels: Array<"x" | "y" | "z"> = ["x", "y", "z"];
+            let changed = false;
 
             for (let i = 0; i < channels.length; i++) {
               const channelBinding = uniform.vec3Binding[channels[i]];
@@ -1271,11 +1283,15 @@
                     channelBinding.outputMin,
                     channelBinding.outputMax,
                   );
+                  changed = true;
                 }
               }
             }
 
-            layer.setUniform(uniform.name, newValue);
+            if (changed) {
+              layer.setUniform(uniform.name, newValue);
+              uniform.value = newValue;
+            }
           }
 
           // Handle color channel bindings
@@ -1291,6 +1307,7 @@
 
             const channelCount = uniform.type === "vec3" ? 3 : 4;
             const newValue = padNumberArray(currentArray, channelCount, 0);
+            let changed = false;
 
             // alpha defaults to 1 when we treat it like color/vec4
             if (channelCount === 4 && currentArray.length < 4) {
@@ -1312,11 +1329,15 @@
                     channelBinding.outputMin,
                     channelBinding.outputMax,
                   );
+                  changed = true;
                 }
               }
             }
 
-            layer.setUniform(uniform.name, newValue);
+            if (changed) {
+              layer.setUniform(uniform.name, newValue);
+              uniform.value = newValue;
+            }
           }
         }
       }

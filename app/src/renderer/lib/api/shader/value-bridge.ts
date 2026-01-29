@@ -30,6 +30,9 @@ export class ShaderValueBridge {
     if (this.isActive) return;
     this.isActive = true;
 
+    // Start value manager loop to update accumulators
+    valueManager.start();
+
     // Subscribe to value changes
     for (const [bindingId, binding] of this.bindings) {
       this.subscribeToValue(bindingId, binding);
@@ -41,6 +44,9 @@ export class ShaderValueBridge {
    */
   stop(): void {
     this.isActive = false;
+
+    // Stop value manager loop
+    valueManager.stop();
 
     // Unsubscribe from all value changes
     for (const [, binding] of this.bindings) {

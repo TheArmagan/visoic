@@ -59,6 +59,11 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private intermediateTextureViewB: GPUTextureView | null = null;
   private currentReadTexture: 'A' | 'B' | null = null;
 
+  // Blit pipeline for copying intermediate texture to canvas (swap chain doesn't support CopyDst)
+  private blitPipeline: GPURenderPipeline | null = null;
+  private blitBindGroupLayout: GPUBindGroupLayout | null = null;
+  private blitSampler: GPUSampler | null = null;
+
   // Performance optimizations
   private bindGroupCache: Map<string, { bindGroup: GPUBindGroup; inputImageView: GPUTextureView | null }> = new Map();
   private vsyncEnabled: boolean = true;
@@ -106,6 +111,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
     this.createPlaceholderTexture();
     this.createIntermediateTextures();
+    this.createBlitPipeline();
   }
 
   private createPlaceholderTexture(): void {
@@ -164,6 +170,98 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.intermediateTextureViewA = this.intermediateTextureA.createView();
     this.intermediateTextureViewB = this.intermediateTextureB.createView();
     this.currentReadTexture = null;
+  }
+
+  /**
+   * Create a simple blit pipeline for copying texture to canvas.
+   * This is needed because swap chain textures don't support CopyDst usage.
+   */
+  private createBlitPipeline(): void {
+    if (!this.device) return;
+
+    // Simple fullscreen blit shader
+    const blitShaderCode = `
+      struct VertexOutput {
+        @builtin(position) position: vec4f,
+        @location(0) uv: vec2f,
+      }
+
+      @vertex
+      fn vertexMain(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+        // Full-screen triangle
+        var pos = array<vec2f, 3>(
+          vec2f(-1.0, -1.0),
+          vec2f(3.0, -1.0),
+          vec2f(-1.0, 3.0)
+        );
+        var uv = array<vec2f, 3>(
+          vec2f(0.0, 1.0),
+          vec2f(2.0, 1.0),
+          vec2f(0.0, -1.0)
+        );
+        var output: VertexOutput;
+        output.position = vec4f(pos[vertexIndex], 0.0, 1.0);
+        output.uv = uv[vertexIndex];
+        return output;
+      }
+
+      @group(0) @binding(0) var srcTexture: texture_2d<f32>;
+      @group(0) @binding(1) var srcSampler: sampler;
+
+      @fragment
+      fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
+        return textureSample(srcTexture, srcSampler, uv);
+      }
+    `;
+
+    const blitShaderModule = this.device.createShaderModule({
+      label: 'blit-shader',
+      code: blitShaderCode,
+    });
+
+    this.blitBindGroupLayout = this.device.createBindGroupLayout({
+      label: 'blit-bind-group-layout',
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'float' },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'filtering' },
+        },
+      ],
+    });
+
+    const blitPipelineLayout = this.device.createPipelineLayout({
+      label: 'blit-pipeline-layout',
+      bindGroupLayouts: [this.blitBindGroupLayout],
+    });
+
+    this.blitPipeline = this.device.createRenderPipeline({
+      label: 'blit-pipeline',
+      layout: blitPipelineLayout,
+      vertex: {
+        module: blitShaderModule,
+        entryPoint: 'vertexMain',
+      },
+      fragment: {
+        module: blitShaderModule,
+        entryPoint: 'fragmentMain',
+        targets: [{ format: this.format }],
+      },
+      primitive: {
+        topology: 'triangle-list',
+      },
+    });
+
+    this.blitSampler = this.device.createSampler({
+      label: 'blit-sampler',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
   }
 
   private getLayerTextureView(layer: ShaderLayer, name: string): GPUTextureView {
@@ -1012,17 +1110,25 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         // Update uniforms using double-buffered uniform buffer
         const uniformData = layer.getUniformData();
 
+        // Calculate accumulated time based on speed
+        const speed = (layer.getUniform('BUILTIN_SPEED') as number) ?? 1.0;
+
+        // Update accumulated time
+        // Note: accumulatedTime is defined in ShaderLayer
+        if (typeof layer.accumulatedTime === 'undefined') {
+          layer.accumulatedTime = 0;
+        }
+        layer.accumulatedTime += deltaTime * speed;
+
         // Fill built-in uniforms
-        uniformData[0] = totalTime;           // time
+        uniformData[0] = layer.accumulatedTime; // time (accumulated)
         uniformData[1] = deltaTime;           // timeDelta
         uniformData[2] = this.canvas.width;   // renderSize.x
         uniformData[3] = this.canvas.height;  // renderSize.y
         uniformData[4] = 0;                   // passIndex (packed as f32)
         uniformData[5] = this.frameCount;     // frameIndex (packed as f32)
         uniformData[6] = layer.opacity;       // layerOpacity
-
-        // Padding for 16-byte alignment before date vec4
-        uniformData[7] = 0;
+        uniformData[7] = speed;               // speed (was _pad0)
 
         // Date uniform - cache date to avoid repeated allocations
         const now = Date.now();
@@ -1059,19 +1165,41 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         }
       }
 
-      // After all layers are rendered, copy the final result to canvas
+      // After all layers are rendered, blit the final result to canvas
       // (only if we have multiple layers and rendered to intermediate textures)
+      // Note: We use a render pass instead of copyTextureToTexture because
+      // swap chain textures don't support CopyDst usage.
       if (enabledLayers.length > 1 && previousOutputTexture) {
-        const finalTexture = previousOutputTexture === 'A'
-          ? this.intermediateTextureA!
-          : this.intermediateTextureB!;
+        const finalTextureView = previousOutputTexture === 'A'
+          ? this.intermediateTextureViewA!
+          : this.intermediateTextureViewB!;
 
-        // Copy the final intermediate texture to the canvas
-        commandEncoder.copyTextureToTexture(
-          { texture: finalTexture },
-          { texture: this.context!.getCurrentTexture() },
-          { width: this.canvas.width, height: this.canvas.height }
-        );
+        // Create bind group for blit
+        const blitBindGroup = this.device!.createBindGroup({
+          label: 'blit-bind-group',
+          layout: this.blitBindGroupLayout!,
+          entries: [
+            { binding: 0, resource: finalTextureView },
+            { binding: 1, resource: this.blitSampler! },
+          ],
+        });
+
+        // Render the final texture to canvas using blit pipeline
+        const blitPass = commandEncoder.beginRenderPass({
+          colorAttachments: [
+            {
+              view: this.context!.getCurrentTexture().createView(),
+              loadOp: 'clear',
+              storeOp: 'store',
+              clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            },
+          ],
+        });
+
+        blitPass.setPipeline(this.blitPipeline!);
+        blitPass.setBindGroup(0, blitBindGroup);
+        blitPass.draw(3);
+        blitPass.end();
       }
     }
 
