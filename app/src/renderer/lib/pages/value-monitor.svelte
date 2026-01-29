@@ -6,6 +6,9 @@
     type AnyValueDefinition,
     type NumberValueDefinition,
     type AccumulatorWrapMode,
+    type ComputedValueSource,
+    type AccumulatorValueSource,
+    type AudioValueSource,
   } from "$lib/api/values";
   import { Button } from "$lib/components/ui/button";
   import { Input } from "$lib/components/ui/input";
@@ -15,6 +18,7 @@
   import * as Select from "$lib/components/ui/select";
   import * as Tooltip from "$lib/components/ui/tooltip";
   import * as Tabs from "$lib/components/ui/tabs";
+  import * as Dialog from "$lib/components/ui/dialog";
   import { toast } from "svelte-sonner";
   import {
     Plus,
@@ -684,6 +688,15 @@
       desc: "Bounces between min and max",
     },
   ];
+
+  // Details Modal state
+  let showDetails = $state(false);
+  let selectedDetailValue = $state<AnyValueDefinition | null>(null);
+
+  function openDetails(value: AnyValueDefinition) {
+    selectedDetailValue = value;
+    showDetails = true;
+  }
 </script>
 
 <div class="w-full h-full p-6 overflow-auto">
@@ -933,248 +946,372 @@
     </section>
 
     <!-- Expression Builder Modal -->
-    {#if showBuilder}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions a11y_interactive_supports_focus -->
-      <div
-        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-        role="dialog"
-        aria-modal="true"
-        tabindex="-1"
-        onclick={() => (showBuilder = false)}
+    <Dialog.Root bind:open={showBuilder}>
+      <Dialog.Content
+        class="max-w-4xl max-h-[80vh] flex flex-col p-0 gap-0 bg-zinc-900 border-white/10"
       >
-        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions a11y_no_static_element_interactions -->
-        <div
-          class="bg-zinc-900 rounded-lg border border-white/10 w-full max-w-4xl max-h-[80vh] overflow-hidden"
-          role="presentation"
-          onclick={(e) => e.stopPropagation()}
-        >
-          <div
-            class="p-4 border-b border-white/10 flex items-center justify-between"
-          >
-            <h3 class="text-lg font-semibold flex items-center gap-2">
-              <Wand2 class="size-5" />
-              Expression Builder
-            </h3>
+        <Dialog.Header class="p-4 border-b border-white/10">
+          <Dialog.Title class="text-lg font-semibold flex items-center gap-2">
+            <Wand2 class="size-5" />
+            Expression Builder
+          </Dialog.Title>
+        </Dialog.Header>
+
+        <div class="p-4 space-y-4 overflow-y-auto">
+          <!-- Current Expression -->
+          <div class="space-y-2">
+            <Label>Expression</Label>
+            <div class="flex gap-2">
+              <Input
+                bind:value={builderExpression}
+                class="font-mono flex-1"
+                placeholder="Build your expression..."
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onclick={() => (builderExpression = "")}
+              >
+                <RotateCcw class="size-4" />
+              </Button>
+            </div>
+          </div>
+
+          <!-- Quick Insert Buttons -->
+          <div class="flex flex-wrap gap-2">
             <Button
-              variant="ghost"
+              variant="outline"
               size="sm"
-              onclick={() => (showBuilder = false)}>×</Button
+              onclick={() => insertToBuilder(" + ")}>+</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(" - ")}>−</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(" * ")}>×</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(" / ")}>÷</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder("(")}>( )</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(")")}>)</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(" % ")}>%</Button
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => insertToBuilder(" ? : ")}
+            >
+              ? :</Button
             >
           </div>
 
-          <div class="p-4 space-y-4">
-            <!-- Current Expression -->
+          <div
+            class="grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[40vh] overflow-auto"
+          >
+            <!-- Functions Panel -->
             <div class="space-y-2">
-              <Label>Expression</Label>
-              <div class="flex gap-2">
-                <Input
-                  bind:value={builderExpression}
-                  class="font-mono flex-1"
-                  placeholder="Build your expression..."
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onclick={() => (builderExpression = "")}
-                >
-                  <RotateCcw class="size-4" />
-                </Button>
-              </div>
-            </div>
-
-            <!-- Quick Insert Buttons -->
-            <div class="flex flex-wrap gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" + ")}>+</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" - ")}>−</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" * ")}>×</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" / ")}>÷</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder("(")}>( )</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(")")}>)</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" % ")}>%</Button
-              >
-              <Button
-                variant="outline"
-                size="sm"
-                onclick={() => insertToBuilder(" ? : ")}
-              >
-                ? :</Button
-              >
-            </div>
-
-            <div
-              class="grid grid-cols-1 lg:grid-cols-2 gap-4 max-h-[40vh] overflow-auto"
-            >
-              <!-- Functions Panel -->
-              <div class="space-y-2">
-                <h4 class="font-medium text-sm text-white/70">Functions</h4>
-                <div class="space-y-1">
-                  {#each Object.entries(functionCategories) as [key, cat]}
-                    <div class="border border-white/10 rounded">
-                      <button
-                        type="button"
-                        class="w-full px-3 py-2 flex items-center justify-between hover:bg-white/5 transition-colors"
-                        onclick={() => toggleCategory(key)}
-                      >
-                        <span class="font-medium text-sm">{cat.label}</span>
-                        {#if expandedCategories.has(key)}
-                          <ChevronUp class="size-4" />
-                        {:else}
-                          <ChevronDown class="size-4" />
-                        {/if}
-                      </button>
+              <h4 class="font-medium text-sm text-white/70">Functions</h4>
+              <div class="space-y-1">
+                {#each Object.entries(functionCategories) as [key, cat]}
+                  <div class="border border-white/10 rounded">
+                    <button
+                      type="button"
+                      class="w-full px-3 py-2 flex items-center justify-between hover:bg-white/5 transition-colors"
+                      onclick={() => toggleCategory(key)}
+                    >
+                      <span class="font-medium text-sm">{cat.label}</span>
                       {#if expandedCategories.has(key)}
-                        <div class="px-3 pb-2 flex flex-wrap gap-1">
-                          {#each cat.functions as fn}
-                            <Tooltip.Provider>
-                              <Tooltip.Root>
-                                <Tooltip.Trigger>
-                                  <button
-                                    type="button"
-                                    class="px-2 py-1 text-xs bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 transition-colors font-mono"
-                                    onclick={() => insertFunction(fn)}
-                                  >
-                                    {fn.name}
-                                  </button>
-                                </Tooltip.Trigger>
-                                <Tooltip.Content>
-                                  <div class="text-sm">
-                                    <div
-                                      class="font-mono font-semibold text-purple-400"
-                                    >
-                                      {fn.usage}
-                                    </div>
-                                    <div class="text-black/80 mt-1">
-                                      {fn.desc}
-                                    </div>
-                                  </div>
-                                </Tooltip.Content>
-                              </Tooltip.Root>
-                            </Tooltip.Provider>
-                          {/each}
-                        </div>
+                        <ChevronUp class="size-4" />
+                      {:else}
+                        <ChevronDown class="size-4" />
                       {/if}
-                    </div>
-                  {/each}
-                </div>
-              </div>
-
-              <!-- Variables Panel -->
-              <div class="space-y-2">
-                <h4 class="font-medium text-sm text-white/70">
-                  System Variables
-                </h4>
-                <div class="space-y-1">
-                  {#each Object.entries(systemVariables) as [key, cat]}
-                    <div class="border border-white/10 rounded">
-                      <button
-                        type="button"
-                        class="w-full px-3 py-2 flex items-center justify-between hover:bg-white/5 transition-colors"
-                        onclick={() => toggleCategory(key)}
-                      >
-                        <span class="font-medium text-sm">{cat.label}</span>
-                        {#if expandedCategories.has(key)}
-                          <ChevronUp class="size-4" />
-                        {:else}
-                          <ChevronDown class="size-4" />
-                        {/if}
-                      </button>
-                      {#if expandedCategories.has(key)}
-                        <div class="px-3 pb-2 flex flex-wrap gap-1">
-                          {#each cat.vars as v}
-                            <Tooltip.Provider>
-                              <Tooltip.Root>
-                                <Tooltip.Trigger>
-                                  <button
-                                    type="button"
-                                    class="px-2 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30 transition-colors font-mono"
-                                    onclick={() => insertVariable(v.name)}
+                    </button>
+                    {#if expandedCategories.has(key)}
+                      <div class="px-3 pb-2 flex flex-wrap gap-1">
+                        {#each cat.functions as fn}
+                          <Tooltip.Provider>
+                            <Tooltip.Root>
+                              <Tooltip.Trigger>
+                                <button
+                                  type="button"
+                                  class="px-2 py-1 text-xs bg-purple-500/20 text-purple-400 rounded hover:bg-purple-500/30 transition-colors font-mono"
+                                  onclick={() => insertFunction(fn)}
+                                >
+                                  {fn.name}
+                                </button>
+                              </Tooltip.Trigger>
+                              <Tooltip.Content>
+                                <div class="text-sm">
+                                  <div
+                                    class="font-mono font-semibold text-purple-400"
                                   >
-                                    {v.name}
-                                  </button>
-                                </Tooltip.Trigger>
-                                <Tooltip.Content>
-                                  <div class="text-sm">
-                                    <div class="font-semibold text-yellow-400">
-                                      {v.desc}
-                                    </div>
-                                    <div class="text-black/60 mt-1 font-mono">
-                                      {v.example}
-                                    </div>
+                                    {fn.usage}
                                   </div>
-                                </Tooltip.Content>
-                              </Tooltip.Root>
-                            </Tooltip.Provider>
-                          {/each}
-                        </div>
-                      {/if}
-                    </div>
-                  {/each}
-                </div>
-
-                <!-- Available Values -->
-                {#if values.length > 0}
-                  <h4 class="font-medium text-sm text-white/70 mt-4">
-                    Available Values
-                  </h4>
-                  <div
-                    class="border border-white/10 rounded p-3 max-h-32 overflow-auto"
-                  >
-                    <div class="flex flex-wrap gap-1">
-                      {#each values as v}
-                        <button
-                          type="button"
-                          class="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 transition-colors font-mono"
-                          onclick={() => insertValue(v.id)}
-                        >
-                          {v.id}
-                        </button>
-                      {/each}
-                    </div>
+                                  <div class="text-black/80 mt-1">
+                                    {fn.desc}
+                                  </div>
+                                </div>
+                              </Tooltip.Content>
+                            </Tooltip.Root>
+                          </Tooltip.Provider>
+                        {/each}
+                      </div>
+                    {/if}
                   </div>
-                {/if}
+                {/each}
               </div>
             </div>
-          </div>
 
-          <div class="p-4 border-t border-white/10 flex justify-end gap-2">
-            <Button variant="outline" onclick={() => (showBuilder = false)}
-              >Cancel</Button
-            >
-            <Button onclick={applyBuilderExpression}>
-              <Zap class="size-4 mr-2" />
-              Apply Expression
-            </Button>
+            <!-- Variables Panel -->
+            <div class="space-y-2">
+              <h4 class="font-medium text-sm text-white/70">
+                System Variables
+              </h4>
+              <div class="space-y-1">
+                {#each Object.entries(systemVariables) as [key, cat]}
+                  <div class="border border-white/10 rounded">
+                    <button
+                      type="button"
+                      class="w-full px-3 py-2 flex items-center justify-between hover:bg-white/5 transition-colors"
+                      onclick={() => toggleCategory(key)}
+                    >
+                      <span class="font-medium text-sm">{cat.label}</span>
+                      {#if expandedCategories.has(key)}
+                        <ChevronUp class="size-4" />
+                      {:else}
+                        <ChevronDown class="size-4" />
+                      {/if}
+                    </button>
+                    {#if expandedCategories.has(key)}
+                      <div class="px-3 pb-2 flex flex-wrap gap-1">
+                        {#each cat.vars as v}
+                          <Tooltip.Provider>
+                            <Tooltip.Root>
+                              <Tooltip.Trigger>
+                                <button
+                                  type="button"
+                                  class="px-2 py-1 text-xs bg-yellow-500/20 text-yellow-400 rounded hover:bg-yellow-500/30 transition-colors font-mono"
+                                  onclick={() => insertVariable(v.name)}
+                                >
+                                  {v.name}
+                                </button>
+                              </Tooltip.Trigger>
+                              <Tooltip.Content>
+                                <div class="text-sm">
+                                  <div class="font-semibold text-yellow-400">
+                                    {v.desc}
+                                  </div>
+                                  <div class="text-black/60 mt-1 font-mono">
+                                    {v.example}
+                                  </div>
+                                </div>
+                              </Tooltip.Content>
+                            </Tooltip.Root>
+                          </Tooltip.Provider>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+
+              <!-- Available Values -->
+              {#if values.length > 0}
+                <h4 class="font-medium text-sm text-white/70 mt-4">
+                  Available Values
+                </h4>
+                <div
+                  class="border border-white/10 rounded p-3 max-h-32 overflow-auto"
+                >
+                  <div class="flex flex-wrap gap-1">
+                    {#each values as v}
+                      <button
+                        type="button"
+                        class="px-2 py-1 text-xs bg-blue-500/20 text-blue-400 rounded hover:bg-blue-500/30 transition-colors font-mono"
+                        onclick={() => insertValue(v.id)}
+                      >
+                        {v.id}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
           </div>
         </div>
-      </div>
-    {/if}
+        <Dialog.Footer
+          class="p-4 border-t border-white/10 flex justify-end gap-2 sm:justify-end"
+        >
+          <Button variant="outline" onclick={() => (showBuilder = false)}
+            >Cancel</Button
+          >
+          <Button onclick={applyBuilderExpression}>
+            <Zap class="size-4 mr-2" />
+            Apply Expression
+          </Button>
+        </Dialog.Footer>
+      </Dialog.Content>
+    </Dialog.Root>
+
+    <!-- Details Modal -->
+    <Dialog.Root bind:open={showDetails}>
+      <Dialog.Content class="max-w-lg bg-zinc-900 border-white/10">
+        {#if selectedDetailValue}
+          <Dialog.Header class="p-4 border-b border-white/10">
+            <Dialog.Title class="text-lg font-semibold flex items-center gap-2">
+              <Code class="size-5" />
+              Value Details: {selectedDetailValue.name}
+            </Dialog.Title>
+          </Dialog.Header>
+
+          <div class="p-6 space-y-4 overflow-y-auto max-h-[80vh]">
+            <div class="space-y-1">
+              <Label class="text-xs uppercase text-white/40">ID</Label>
+              <div class="font-mono bg-white/5 p-2 rounded">
+                {selectedDetailValue.id}
+              </div>
+            </div>
+
+            <div class="space-y-1">
+              <Label class="text-xs uppercase text-white/40">Type</Label>
+              <div class="text-sm">{selectedDetailValue.type}</div>
+            </div>
+
+            <div class="space-y-1">
+              <Label class="text-xs uppercase text-white/40">Source</Label>
+              <span
+                class="px-2 py-1 rounded text-xs {getSourceBadgeClass(
+                  selectedDetailValue.source.type,
+                )}"
+              >
+                {selectedDetailValue.source.type}
+              </span>
+            </div>
+
+            {#if selectedDetailValue.source.type === "computed"}
+              {@const source =
+                selectedDetailValue.source as ComputedValueSource}
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-white/40">Expression</Label
+                >
+                <div
+                  class="font-mono bg-white/5 p-2 rounded text-blue-300 break-words"
+                >
+                  {source.expression}
+                </div>
+              </div>
+              {#if source.dependencies && source.dependencies.length > 0}
+                <div class="space-y-1">
+                  <Label class="text-xs uppercase text-white/40"
+                    >Dependencies</Label
+                  >
+                  <div class="flex flex-wrap gap-1">
+                    {#each source.dependencies as dep}
+                      <span
+                        class="px-1.5 py-0.5 rounded text-xs bg-white/10 font-mono"
+                        >{dep}</span
+                      >
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            {/if}
+
+            {#if selectedDetailValue.source.type === "accumulator"}
+              {@const source =
+                selectedDetailValue.source as AccumulatorValueSource}
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-white/40"
+                  >Rate Expression</Label
+                >
+                <div class="font-mono bg-white/5 p-2 rounded text-orange-300">
+                  {source.rateExpression}
+                </div>
+              </div>
+              {#if source.rateDependencies && source.rateDependencies.length > 0}
+                <div class="space-y-1">
+                  <Label class="text-xs uppercase text-white/40"
+                    >Rate Dependencies</Label
+                  >
+                  <div class="flex flex-wrap gap-1">
+                    {#each source.rateDependencies as dep}
+                      <span
+                        class="px-1.5 py-0.5 rounded text-xs bg-white/10 font-mono"
+                        >{dep}</span
+                      >
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+              <div class="grid grid-cols-2 gap-4">
+                <div class="space-y-1">
+                  <Label class="text-xs uppercase text-white/40"
+                    >Wrap Mode</Label
+                  >
+                  <div>{source.wrapMode}</div>
+                </div>
+                <div class="space-y-1">
+                  <Label class="text-xs uppercase text-white/40"
+                    >Initial Value</Label
+                  >
+                  <div>{source.initialValue}</div>
+                </div>
+              </div>
+              {#if source.limitExpression}
+                <div class="space-y-1">
+                  <Label class="text-xs uppercase text-white/40"
+                    >Limit Expression</Label
+                  >
+                  <div class="font-mono bg-white/5 p-2 rounded">
+                    {source.limitExpression}
+                  </div>
+                </div>
+              {/if}
+            {/if}
+
+            {#if selectedDetailValue.source.type === "audio"}
+              {@const source = selectedDetailValue.source as AudioValueSource}
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-white/40"
+                  >Analyzer ID</Label
+                >
+                <div class="font-mono text-sm">{source.sourceId}</div>
+              </div>
+              <div class="space-y-1">
+                <Label class="text-xs uppercase text-white/40"
+                  >Extraction Type</Label
+                >
+                <div class="text-sm">{source.extraction.type}</div>
+              </div>
+            {/if}
+          </div>
+
+          <Dialog.Footer class="p-4 border-t border-white/10 sm:justify-end">
+            <Button variant="outline" onclick={() => (showDetails = false)}
+              >Close</Button
+            >
+          </Dialog.Footer>
+        {/if}
+      </Dialog.Content>
+    </Dialog.Root>
 
     <!-- Filters -->
     <div class="flex flex-wrap gap-4 items-end">
@@ -1312,6 +1449,14 @@
                         title="Remove"
                       >
                         <Trash2 class="size-3 text-red-400" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onclick={() => openDetails(valueDef)}
+                        title="Info"
+                      >
+                        <HelpCircle class="size-3 text-blue-400" />
                       </Button>
                     </div>
                   </td>

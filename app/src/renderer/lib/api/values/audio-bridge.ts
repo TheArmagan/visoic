@@ -290,12 +290,58 @@ class AudioValueBridge {
   /**
    * Update analyzer configuration
    */
-  updateAnalyzerConfig(id: string, config: { fftSize?: FFTSize; smoothingTimeConstant?: number; gain?: number }): boolean {
+  async updateAnalyzerConfig(id: string, config: {
+    fftSize?: FFTSize;
+    smoothingTimeConstant?: number;
+    gain?: number;
+    normalizationEnabled?: boolean;
+    deviceId?: string;
+  }): Promise<boolean> {
     const handle = this.analyzerHandles.get(id);
     if (!handle) return false;
 
-    // Update the actual analyzer
-    handle.updateConfig(config);
+    // Check if device changed - requires recreation
+    if (config.deviceId && config.deviceId !== handle.deviceId) {
+      const currentConfig = handle.analyzer.getConfig();
+      const normConfig = handle.analyzer.getNormalizationConfig();
+      // Use new config or fall back to current
+      const normEnabled = config.normalizationEnabled ?? handle.analyzer.isNormalizationEnabled();
+
+      // Clean up old analyzer but keep bindings
+      handle.destroy();
+      this.analyzerHandles.delete(id);
+
+      try {
+        const newHandle = await audioManager.createAnalyzer({
+          id: id,
+          deviceId: config.deviceId,
+          fftSize: (config.fftSize ?? currentConfig.fftSize) as FFTSize,
+          smoothingTimeConstant: config.smoothingTimeConstant ?? currentConfig.smoothingTimeConstant,
+          gain: config.gain ?? currentConfig.gain,
+          label: currentConfig.label,
+          normalizationEnabled: normEnabled,
+          normalization: normConfig
+        });
+        this.analyzerHandles.set(id, newHandle);
+      } catch (error) {
+        console.error(`[AudioBridge] Failed to recreate analyzer ${id} on device ${config.deviceId}:`, error);
+        return false;
+      }
+    } else {
+      // Direct update
+      handle.updateConfig(config);
+
+      // Handle normalization toggle
+      if (config.normalizationEnabled !== undefined) {
+        if (config.normalizationEnabled) {
+          // If enabling, ensure we preserve existing normalization settings
+          const normConfig = handle.analyzer.getNormalizationConfig();
+          handle.analyzer.enableNormalization(normConfig);
+        } else {
+          handle.analyzer.disableNormalization();
+        }
+      }
+    }
 
     // Update the config manager
     if (!this.isRestoring) {
@@ -304,9 +350,11 @@ class AudioValueBridge {
         configManager.removeAnalyzer(id);
         configManager.addAnalyzer({
           ...existingConfig,
-          fftSize: config.fftSize as FFTSize ?? existingConfig.fftSize as FFTSize,
+          fftSize: (config.fftSize as FFTSize) ?? existingConfig.fftSize,
           smoothingTimeConstant: config.smoothingTimeConstant ?? existingConfig.smoothingTimeConstant,
           gain: config.gain ?? existingConfig.gain,
+          normalizationEnabled: config.normalizationEnabled ?? existingConfig.normalizationEnabled,
+          deviceId: config.deviceId ?? existingConfig.deviceId,
         });
         // Immediately save to ensure persistence
         configManager.save();
