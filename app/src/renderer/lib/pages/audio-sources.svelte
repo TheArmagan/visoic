@@ -6,6 +6,7 @@
     type CreateAnalyzerOptions,
     type NormalizationConfig,
     DEFAULT_NORMALIZATION_CONFIG,
+    type FFTSize,
   } from "$lib/api/audio";
   import { audioBridge } from "$lib/api/values";
   import { Button } from "$lib/components/ui/button";
@@ -72,7 +73,7 @@
 
   // Analyzer creation form
   let newAnalyzerConfig = $state<
-    CreateAnalyzerOptions & {
+    Omit<CreateAnalyzerOptions, "normalization"> & {
       smoothingValue: number[];
       gainValue: number[];
       normalization: {
@@ -272,7 +273,7 @@
 
     // Update config (including device and normalization toggle)
     await audioBridge.updateAnalyzerConfig(id, {
-      fftSize: editForm.fftSize,
+      fftSize: editForm.fftSize as FFTSize,
       smoothingTimeConstant: editForm.smoothing[0],
       gain: editForm.gain[0],
       normalizationEnabled: editForm.normalizationEnabled,
@@ -407,8 +408,9 @@
             <Label>FFT Size</Label>
             <Select.Root
               type="single"
-              bind:value={newAnalyzerConfig.fftSize}
-              onValueChange={(v) => (newAnalyzerConfig.fftSize = Number(v))}
+              value={String(newAnalyzerConfig.fftSize)}
+              onValueChange={(v) =>
+                (newAnalyzerConfig.fftSize = Number(v) as FFTSize)}
             >
               <Select.Trigger class="w-full">
                 {newAnalyzerConfig.fftSize} ({(newAnalyzerConfig.fftSize as number) /
@@ -416,7 +418,10 @@
               </Select.Trigger>
               <Select.Content>
                 {#each fftSizes as size}
-                  <Select.Item value={size} label="{size} ({size / 2} bins)" />
+                  <Select.Item
+                    value={String(size)}
+                    label="{size} ({size / 2} bins)"
+                  />
                 {/each}
               </Select.Content>
             </Select.Root>
@@ -428,6 +433,7 @@
               Smoothing: {newAnalyzerConfig.smoothingValue[0].toFixed(2)}
             </Label>
             <Slider
+              type="multiple"
               bind:value={newAnalyzerConfig.smoothingValue}
               min={0}
               max={1}
@@ -445,6 +451,7 @@
               Gain: {newAnalyzerConfig.gainValue[0].toFixed(2)}x
             </Label>
             <Slider
+              type="multiple"
               bind:value={newAnalyzerConfig.gainValue}
               min={0.1}
               max={5}
@@ -489,6 +496,7 @@
                       )}
                     </Label>
                     <Slider
+                      type="multiple"
                       bind:value={newAnalyzerConfig.normalization.targetLevel}
                       min={0.1}
                       max={1}
@@ -507,6 +515,7 @@
                       )}
                     </Label>
                     <Slider
+                      type="multiple"
                       bind:value={newAnalyzerConfig.normalization.attackTime}
                       min={0.01}
                       max={0.5}
@@ -525,6 +534,7 @@
                       )}
                     </Label>
                     <Slider
+                      type="multiple"
                       bind:value={newAnalyzerConfig.normalization.releaseTime}
                       min={0.01}
                       max={0.3}
@@ -543,6 +553,7 @@
                       )}x
                     </Label>
                     <Slider
+                      type="multiple"
                       bind:value={newAnalyzerConfig.normalization.maxGain}
                       min={1}
                       max={10}
@@ -561,6 +572,7 @@
                       )}x
                     </Label>
                     <Slider
+                      type="multiple"
                       bind:value={newAnalyzerConfig.normalization.minGain}
                       min={0.01}
                       max={1}
@@ -598,6 +610,7 @@
                         )} dB
                       </Label>
                       <Slider
+                        type="multiple"
                         bind:value={
                           newAnalyzerConfig.normalization.compressorThreshold
                         }
@@ -616,6 +629,7 @@
                         )}:1
                       </Label>
                       <Slider
+                        type="multiple"
                         bind:value={
                           newAnalyzerConfig.normalization.compressorRatio
                         }
@@ -703,13 +717,19 @@
                     <!-- FFT Size -->
                     <div class="space-y-2">
                       <Label class="text-white/70">FFT Size</Label>
-                      <Select.Root type="single" bind:value={editForm.fftSize}>
+                      <Select.Root
+                        type="single"
+                        value={String(editForm.fftSize)}
+                        onValueChange={(v) => (editForm.fftSize = Number(v))}
+                      >
                         <Select.Trigger class="w-full">
                           {editForm.fftSize}
                         </Select.Trigger>
                         <Select.Content>
                           {#each fftSizes as size}
-                            <Select.Item value={size}>{size}</Select.Item>
+                            <Select.Item value={String(size)}
+                              >{size}</Select.Item
+                            >
                           {/each}
                         </Select.Content>
                       </Select.Root>
@@ -724,6 +744,7 @@
                           >Smoothing: {editForm.smoothing[0].toFixed(2)}</Label
                         >
                         <Slider
+                          type="multiple"
                           bind:value={editForm.smoothing}
                           min={0}
                           max={0.99}
@@ -739,6 +760,7 @@
                           >Gain: {editForm.gain[0].toFixed(1)}x</Label
                         >
                         <Slider
+                          type="multiple"
                           bind:value={editForm.gain}
                           min={0.1}
                           max={5}
@@ -772,6 +794,7 @@
                               )}
                             </Label>
                             <Slider
+                              type="multiple"
                               bind:value={editForm.normalization.targetLevel}
                               min={0.1}
                               max={1}
@@ -787,6 +810,7 @@
                               )}s
                             </Label>
                             <Slider
+                              type="multiple"
                               bind:value={editForm.normalization.attackTime}
                               min={0.001}
                               max={0.5}
@@ -802,6 +826,7 @@
                               )}s
                             </Label>
                             <Slider
+                              type="multiple"
                               bind:value={editForm.normalization.releaseTime}
                               min={0.01}
                               max={2}
@@ -817,6 +842,7 @@
                               )}x
                             </Label>
                             <Slider
+                              type="multiple"
                               bind:value={editForm.normalization.maxGain}
                               min={1}
                               max={10}
@@ -832,6 +858,7 @@
                               )}
                             </Label>
                             <Slider
+                              type="multiple"
                               bind:value={editForm.normalization.minGain}
                               min={0}
                               max={1}
@@ -860,6 +887,7 @@
                                 )} dB
                               </Label>
                               <Slider
+                                type="multiple"
                                 bind:value={
                                   editForm.normalization.compressorThreshold
                                 }
@@ -877,6 +905,7 @@
                                 )}:1
                               </Label>
                               <Slider
+                                type="multiple"
                                 bind:value={
                                   editForm.normalization.compressorRatio
                                 }

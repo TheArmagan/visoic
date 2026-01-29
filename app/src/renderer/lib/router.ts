@@ -1,10 +1,15 @@
 import type { Component } from 'svelte';
 import { get, writable } from 'svelte/store';
 
+// @ts-ignore
 import HomePage from '$lib/pages/home.svelte';
+// @ts-ignore
 import AudioSourcesPage from '$lib/pages/audio-sources.svelte';
+// @ts-ignore
 import ValueBindingsPage from '$lib/pages/value-bindings.svelte';
+// @ts-ignore
 import ValueMonitorPage from '$lib/pages/value-monitor.svelte';
+// @ts-ignore
 import ShaderEditorPage from '$lib/pages/shader-editor.svelte';
 
 export type RouterState = {

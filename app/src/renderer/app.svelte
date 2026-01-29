@@ -52,21 +52,21 @@
     <div class="flex h-12">
       <button
         class="w-12 h-12 flex items-center justify-center hover:bg-white/25"
-        onclick={() => window.VISOICNative.frame.minimize()}
+        onclick={() => (window as any).VISOICNative.frame.minimize()}
         style="-webkit-app-region: no-drag;"
       >
         <Minus class="size-4" />
       </button>
       <button
         class="w-12 h-12 flex items-center justify-center hover:bg-white/25"
-        onclick={() => window.VISOICNative.frame.maximize()}
+        onclick={() => (window as any).VISOICNative.frame.maximize()}
         style="-webkit-app-region: no-drag;"
       >
         <Maximize class="size-4" />
       </button>
       <button
         class="w-12 h-12 flex items-center justify-center hover:bg-red-500/75"
-        onclick={() => window.VISOICNative.frame.close()}
+        onclick={() => (window as any).VISOICNative.frame.close()}
         style="-webkit-app-region: no-drag;"
       >
         <X class="size-4" />

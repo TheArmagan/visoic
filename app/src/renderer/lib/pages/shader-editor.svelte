@@ -144,7 +144,7 @@
 
   // Canvas refs - NOT reactive to avoid infinite loops
   let canvasRefs: Map<string, HTMLCanvasElement> = new Map();
-  let previewContainer: HTMLDivElement | null = null;
+  let previewContainer: HTMLDivElement | null = $state(null);
 
   // Popup window state (using window.open - persists across tab changes)
   // Store globally to survive component remounts
@@ -1810,6 +1810,8 @@ ${lastShaderError.shaderCode}`;
           </div>
 
           <div class="flex flex-col gap-1 max-h-40 overflow-y-auto">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <!-- svelte-ignore a11y_click_events_have_key_events -->
             {#each contexts as ctx}
               <div
                 class="flex items-center gap-2 p-2 rounded cursor-pointer hover:bg-muted/50"

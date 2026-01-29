@@ -1213,7 +1213,7 @@
                 <Label class="text-xs uppercase text-white/40">Expression</Label
                 >
                 <div
-                  class="font-mono bg-white/5 p-2 rounded text-blue-300 break-words"
+                  class="font-mono bg-white/5 p-2 rounded text-blue-300 wrap-break-word"
                 >
                   {source.expression}
                 </div>
