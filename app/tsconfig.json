@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "moduleResolution": "node",
+    "noImplicitAny": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "resolveJsonModule": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "paths": {
+      "$lib": [
+        "./src/renderer/lib"
+      ],
+      "$lib/*": [
+        "./src/renderer/lib/*"
+      ]
+    }
+  },
+  "include": [
+    "src/main/**/*",
+    "src/renderer/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
