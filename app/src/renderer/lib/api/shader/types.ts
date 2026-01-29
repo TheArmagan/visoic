@@ -230,9 +230,21 @@ export type RenderContextEvents = {
   'frame': { stats: RenderStats };
   'resize': { width: number; height: number };
   'error': { error: Error };
+  'shader:error': { layerId: string; error: ShaderError };
   'layer:added': { layerId: string };
   'layer:removed': { layerId: string };
 };
+
+/**
+ * Shader compilation error details
+ */
+export interface ShaderError {
+  layerId: string;
+  message: string;
+  line?: number;
+  column?: number;
+  shaderCode: string;
+}
 
 /**
  * Event map for ShaderLayer

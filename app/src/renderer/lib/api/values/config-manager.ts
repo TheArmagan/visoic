@@ -212,7 +212,10 @@ export class ConfigManager extends EventEmitter<ConfigEventMap> {
       this.isDirty = false;
       const api = (window as any).VISOICNative;
       if (api?.config?.save) {
-        await api.config.save(this.config);
+        // Serialize through JSON to ensure only plain cloneable values are sent through IPC
+        // This strips any non-serializable values (functions, symbols, circular refs, etc.)
+        const cleanConfig = JSON.parse(JSON.stringify(this.config));
+        await api.config.save(cleanConfig);
         this.emit('save', this.config);
         console.log('[ConfigManager] Config saved');
       } else {

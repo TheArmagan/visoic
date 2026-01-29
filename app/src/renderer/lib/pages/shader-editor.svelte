@@ -11,6 +11,7 @@
     type ISFInput,
     type BlendMode,
     type RenderStats,
+    type ShaderError,
   } from "$lib/api/shader";
   import {
     valueManager,
@@ -53,6 +54,8 @@
     FolderOpen,
     ArrowUp,
     ArrowDown,
+    AlertTriangle,
+    ExternalLink,
   } from "@lucide/svelte";
 
   // ==========================================
@@ -62,6 +65,10 @@
   let isSupported = $state(false);
   let isInitialized = $state(false);
   let isLoading = $state(true);
+
+  // Shader error state
+  let showShaderErrorDialog = $state(false);
+  let lastShaderError = $state<ShaderError | null>(null);
 
   // ISF Shader browser state
   let isfCategories = $state<string[]>([]);
@@ -138,6 +145,26 @@
   // Canvas refs - NOT reactive to avoid infinite loops
   let canvasRefs: Map<string, HTMLCanvasElement> = new Map();
   let previewContainer: HTMLDivElement | null = null;
+
+  // Popup window state (using window.open - persists across tab changes)
+  // Store globally to survive component remounts
+  const POPUP_STORAGE_KEY = "__visoic_shader_popup__";
+
+  function getGlobalPopupState(): {
+    window: Window | null;
+    contextId: string | null;
+    animationFrame: number | null;
+  } {
+    const win = window as any;
+    if (!win[POPUP_STORAGE_KEY]) {
+      win[POPUP_STORAGE_KEY] = {
+        window: null,
+        contextId: null,
+        animationFrame: null,
+      };
+    }
+    return win[POPUP_STORAGE_KEY];
+  }
 
   // Dialog states
   let showAddContextDialog = $state(false);
@@ -235,6 +262,9 @@
     // Save config
     saveConfig();
 
+    // DON'T close popup window - let it persist across tab changes
+    // User must manually close it
+
     // Don't stop or destroy contexts - they keep running in background
     // Just clear canvas refs since they'll be recreated on remount
     canvasRefs.clear();
@@ -314,13 +344,23 @@
         const canvas = existingContext.canvas as HTMLCanvasElement;
         canvasRefs.set(ctxConfig.id, canvas);
 
-        // Restore layer shader keys from config
+        // Attach error listener to existing context
+        attachShaderErrorListener(existingContext);
+
+        // Restore layer shader keys and uniform bindings from config
         for (const layerConfig of ctxConfig.layers) {
           const layerKey = `${ctxConfig.id}:${layerConfig.id}`;
           pendingLayerShaderKeys.set(layerKey, {
             contextId: ctxConfig.id,
             shaderKey: layerConfig.shaderKey,
             customSource: layerConfig.customSource,
+            uniforms: layerConfig.uniforms.map((u) => ({
+              name: u.name,
+              binding: u.binding,
+              colorBinding: u.colorBinding,
+              vec2Binding: u.vec2Binding,
+              vec3Binding: u.vec3Binding,
+            })),
           });
         }
       } else {
@@ -355,6 +395,9 @@
         fpsLimit: config.fpsLimit,
       });
 
+      // Listen for shader errors
+      attachShaderErrorListener(context);
+
       canvasRefs.set(config.id, canvas);
 
       // Add layers
@@ -371,6 +414,15 @@
     } catch (error) {
       console.error("Failed to create context from config:", error);
     }
+  }
+
+  function attachShaderErrorListener(context: RenderContext) {
+    context.on("shader:error", ({ error }) => {
+      lastShaderError = error;
+      showShaderErrorDialog = true;
+      refreshContexts(); // Update running state
+      toast.error(`Shader error in layer ${error.layerId}: ${error.message}`);
+    });
   }
 
   async function createLayerFromConfig(
@@ -593,13 +645,16 @@
     canvas.height = newContextForm.height;
 
     try {
-      await shaderManager.createContext({
+      const context = await shaderManager.createContext({
         id: newContextForm.id,
         canvas,
         width: newContextForm.width,
         height: newContextForm.height,
         fpsLimit: newContextForm.fpsLimit,
       });
+
+      // Listen for shader errors
+      attachShaderErrorListener(context);
 
       canvasRefs.set(newContextForm.id, canvas);
 
@@ -1323,6 +1378,174 @@
   });
 
   // ==========================================
+  // Popup Window (window.open - persists across tabs)
+  // ==========================================
+
+  // Resume render loop if popup is still open when component mounts
+  $effect(() => {
+    const state = getGlobalPopupState();
+    if (state.window && !state.window.closed && state.contextId) {
+      // Popup exists from before, restart render loop with current canvas refs
+      startPopupRenderLoop(state.contextId);
+    }
+  });
+
+  function openPopupWindow() {
+    if (!currentContextId) {
+      toast.error("Select a context first");
+      return;
+    }
+
+    const ctx = contexts.find((c) => c.id === currentContextId);
+    if (!ctx) return;
+
+    const state = getGlobalPopupState();
+
+    // Check if popup already open for this context
+    if (
+      state.window &&
+      !state.window.closed &&
+      state.contextId === currentContextId
+    ) {
+      state.window.focus();
+      toast.info("Preview window focused");
+      return;
+    }
+
+    // Close existing popup if different context
+    if (state.window && !state.window.closed) {
+      stopPopupRenderLoop();
+      state.window.close();
+    }
+
+    // Open new popup window
+    const width = ctx.width;
+    const height = ctx.height;
+    const left = Math.round((window.screen.width - width) / 2);
+    const top = Math.round((window.screen.height - height) / 2);
+
+    const popup = window.open(
+      "",
+      "ShaderPreview",
+      `width=${width},height=${height},left=${left},top=${top},resizable=yes,menubar=no,toolbar=no,location=no,status=no`,
+    );
+
+    if (!popup) {
+      toast.error("Failed to open popup window. Check popup blocker settings.");
+      return;
+    }
+
+    // Setup popup window document
+    popup.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Shader Output - ${currentContextId}</title>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { 
+              background: #000; 
+              display: flex; 
+              align-items: center; 
+              justify-content: center; 
+              min-height: 100vh;
+              overflow: hidden;
+            }
+            canvas { 
+              max-width: 100%; 
+              max-height: 100vh; 
+              object-fit: contain;
+            }
+          </style>
+        </head>
+        <body>
+          <canvas id="popupCanvas" width="${width}" height="${height}"></canvas>
+        </body>
+      </html>
+    `);
+    popup.document.close();
+
+    // Store in global state
+    state.window = popup;
+    state.contextId = currentContextId;
+
+    // Start render loop
+    startPopupRenderLoop(currentContextId);
+    toast.success("Opened shader output in new window");
+  }
+
+  function startPopupRenderLoop(contextId: string) {
+    const state = getGlobalPopupState();
+
+    // Stop existing loop if any
+    if (state.animationFrame !== null) {
+      cancelAnimationFrame(state.animationFrame);
+      state.animationFrame = null;
+    }
+
+    function renderToPopup() {
+      const currentState = getGlobalPopupState();
+
+      // Check if popup is still valid
+      if (
+        !currentState.window ||
+        currentState.window.closed ||
+        currentState.contextId !== contextId
+      ) {
+        stopPopupRenderLoop();
+        return;
+      }
+
+      const srcCanvas = canvasRefs.get(contextId);
+      const popupCanvas = currentState.window.document.getElementById(
+        "popupCanvas",
+      ) as HTMLCanvasElement | null;
+      const popupCtx = popupCanvas?.getContext("2d");
+
+      if (srcCanvas && popupCanvas && popupCtx) {
+        // Resize popup canvas if source size changed
+        if (
+          popupCanvas.width !== srcCanvas.width ||
+          popupCanvas.height !== srcCanvas.height
+        ) {
+          popupCanvas.width = srcCanvas.width;
+          popupCanvas.height = srcCanvas.height;
+        }
+
+        try {
+          // Direct draw - no IPC, no pixel copying
+          popupCtx.drawImage(srcCanvas, 0, 0);
+        } catch (e) {
+          // Ignore draw errors
+        }
+      }
+
+      currentState.animationFrame = requestAnimationFrame(renderToPopup);
+    }
+
+    renderToPopup();
+  }
+
+  function stopPopupRenderLoop() {
+    const state = getGlobalPopupState();
+    if (state.animationFrame !== null) {
+      cancelAnimationFrame(state.animationFrame);
+      state.animationFrame = null;
+    }
+  }
+
+  function closePopupWindow() {
+    const state = getGlobalPopupState();
+    stopPopupRenderLoop();
+
+    if (state.window && !state.window.closed) {
+      state.window.close();
+    }
+    state.window = null;
+    state.contextId = null;
+  }
+
+  // ==========================================
   // Helpers
   // ==========================================
 
@@ -1486,6 +1709,40 @@
     // Find in loaded ISF shaders - use untrack to avoid reactive loops
     const shader = untrack(() => isfShaders.find((s) => s.id === key));
     return shader?.name || key;
+  }
+
+  function copyShaderErrorToClipboard() {
+    if (!lastShaderError) return;
+
+    const errorText = `Shader Error in Layer: ${lastShaderError.layerId}
+Message: ${lastShaderError.message}
+Line: ${lastShaderError.line ?? "N/A"}
+Column: ${lastShaderError.column ?? "N/A"}
+
+--- Shader Code ---
+${lastShaderError.shaderCode}`;
+
+    navigator.clipboard
+      .writeText(errorText)
+      .then(() => {
+        toast.success("Error details copied to clipboard");
+      })
+      .catch(() => {
+        toast.error("Failed to copy to clipboard");
+      });
+  }
+
+  function copyShaderCodeToClipboard() {
+    if (!lastShaderError?.shaderCode) return;
+
+    navigator.clipboard
+      .writeText(lastShaderError.shaderCode)
+      .then(() => {
+        toast.success("Shader code copied to clipboard");
+      })
+      .catch(() => {
+        toast.error("Failed to copy to clipboard");
+      });
   }
 </script>
 
@@ -1748,7 +2005,18 @@
       <div
         class="flex-1 border rounded-lg p-4 flex flex-col gap-4 overflow-hidden w-full"
       >
-        <h3 class="font-semibold">Preview</h3>
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold">Preview</h3>
+          <Button
+            size="sm"
+            variant="ghost"
+            onclick={openPopupWindow}
+            disabled={!currentContextId}
+            title="Open in new window"
+          >
+            <ExternalLink class="w-4 h-4" />
+          </Button>
+        </div>
         <div class="flex-1 bg-black rounded-lg overflow-hidden relative w-full">
           <div
             bind:this={previewContainer}
@@ -2534,6 +2802,73 @@
         >Cancel</Button
       >
       <Button onclick={saveBinding}>Save Binding</Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
+<!-- Shader Error Dialog -->
+<Dialog.Root bind:open={showShaderErrorDialog}>
+  <Dialog.Content class="max-w-4xl max-h-[80vh] overflow-hidden flex flex-col">
+    <Dialog.Header>
+      <Dialog.Title class="flex items-center gap-2 text-red-500">
+        <AlertTriangle class="h-5 w-5" />
+        Shader Compilation Error
+      </Dialog.Title>
+      <Dialog.Description>
+        {#if lastShaderError}
+          <div class="text-sm">
+            <span class="font-medium">Layer:</span>
+            {lastShaderError.layerId}
+            {#if lastShaderError.line}
+              <span class="ml-4 font-medium">Line:</span> {lastShaderError.line}
+            {/if}
+            {#if lastShaderError.column}
+              <span class="ml-2 font-medium">Column:</span>
+              {lastShaderError.column}
+            {/if}
+          </div>
+        {/if}
+      </Dialog.Description>
+    </Dialog.Header>
+
+    {#if lastShaderError}
+      <div class="flex flex-col gap-4 py-4 flex-1 overflow-hidden">
+        <!-- Error Message -->
+        <div class="p-3 bg-red-500/10 border border-red-500/30 rounded-md">
+          <p class="text-sm font-mono text-red-400">
+            {lastShaderError.message}
+          </p>
+        </div>
+
+        <!-- Shader Code -->
+        <div class="flex flex-col flex-1 overflow-hidden">
+          <div class="flex items-center justify-between mb-2">
+            <Label class="text-xs text-muted-foreground"
+              >Generated Shader Code</Label
+            >
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={copyShaderCodeToClipboard}
+            >
+              <Copy class="h-3 w-3 mr-1" />
+              Copy Code
+            </Button>
+          </div>
+          <div class="flex-1 overflow-auto bg-muted/50 rounded-md p-3 border">
+            <pre
+              class="text-xs font-mono whitespace-pre overflow-x-auto">{lastShaderError.shaderCode}</pre>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    <Dialog.Footer>
+      <Button variant="outline" onclick={copyShaderErrorToClipboard}>
+        <Copy class="h-4 w-4 mr-2" />
+        Copy All
+      </Button>
+      <Button onclick={() => (showShaderErrorDialog = false)}>Close</Button>
     </Dialog.Footer>
   </Dialog.Content>
 </Dialog.Root>

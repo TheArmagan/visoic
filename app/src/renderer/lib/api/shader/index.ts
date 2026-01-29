@@ -22,6 +22,7 @@ export type {
   ShaderManagerEvents,
   RenderContextEvents,
   ShaderLayerEvents,
+  ShaderError,
 } from './types';
 
 export { BUILTIN_UNIFORMS } from './types';

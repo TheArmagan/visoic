@@ -11,6 +11,7 @@ import type {
   RenderContextEvents,
   RenderStats,
   ShaderLayerConfig,
+  ShaderError,
 } from './types';
 
 /**
@@ -57,6 +58,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private intermediateTextureViewA: GPUTextureView | null = null;
   private intermediateTextureViewB: GPUTextureView | null = null;
   private currentReadTexture: 'A' | 'B' | null = null;
+
+  // Performance optimizations
+  private bindGroupCache: Map<string, { bindGroup: GPUBindGroup; inputImageView: GPUTextureView | null }> = new Map();
+  private vsyncEnabled: boolean = true;
+  private highFpsChannel: MessageChannel | null = null;
+
+  // Last shader error
+  private _lastShaderError: ShaderError | null = null;
 
   constructor(config: RenderContextConfig) {
     super();
@@ -142,14 +151,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       label: `${this.id}-intermediate-A`,
       size,
       format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
     });
 
     this.intermediateTextureB = this.device.createTexture({
       label: `${this.id}-intermediate-B`,
       size,
       format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
     });
 
     this.intermediateTextureViewA = this.intermediateTextureA.createView();
@@ -268,11 +277,26 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   }
 
   /**
-   * Set FPS limit
+   * Set FPS limit (0 = unlimited/vsync only)
    */
   setFpsLimit(fps: number): void {
-    this.fpsLimit = Math.max(1, Math.min(240, fps));
-    this.minFrameTime = 1000 / this.fpsLimit;
+    if (fps === 0) {
+      // Unlimited - rely on vsync or GPU timing
+      this.fpsLimit = 0;
+      this.minFrameTime = 0;
+      this.vsyncEnabled = true;
+    } else {
+      this.fpsLimit = Math.max(1, Math.min(1000, fps));
+      this.minFrameTime = 1000 / this.fpsLimit;
+      this.vsyncEnabled = fps <= 60;
+    }
+  }
+
+  /**
+   * Enable/disable vsync-based rendering
+   */
+  setVsyncEnabled(enabled: boolean): void {
+    this.vsyncEnabled = enabled;
   }
 
   /**
@@ -299,6 +323,20 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
    */
   isRunning(): boolean {
     return this._isRunning;
+  }
+
+  /**
+   * Get the last shader compilation error (if any)
+   */
+  getLastShaderError(): ShaderError | null {
+    return this._lastShaderError;
+  }
+
+  /**
+   * Clear the last shader error
+   */
+  clearLastShaderError(): void {
+    this._lastShaderError = null;
   }
 
   /**
@@ -399,8 +437,18 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       const vertexInfo = await vertexModule.getCompilationInfo();
       for (const msg of vertexInfo.messages) {
         if (msg.type === 'error') {
+          const shaderError: ShaderError = {
+            layerId: layer.id,
+            message: msg.message,
+            line: msg.lineNum,
+            column: msg.linePos,
+            shaderCode: vertexShader,
+          };
+          this._lastShaderError = shaderError;
           console.error(`[RenderContext] Vertex shader error in ${layer.id}:`, msg.message, `(line ${msg.lineNum}, col ${msg.linePos})`);
+          this.emit('shader:error', { layerId: layer.id, error: shaderError });
           this.emit('error', { error: new Error(`Vertex shader error: ${msg.message}`) });
+          this.stop();
           return;
         } else if (msg.type === 'warning') {
           console.warn(`[RenderContext] Vertex shader warning in ${layer.id}:`, msg.message);
@@ -416,9 +464,19 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       const fragmentInfo = await fragmentModule.getCompilationInfo();
       for (const msg of fragmentInfo.messages) {
         if (msg.type === 'error') {
+          const shaderError: ShaderError = {
+            layerId: layer.id,
+            message: msg.message,
+            line: msg.lineNum,
+            column: msg.linePos,
+            shaderCode: fragmentShader,
+          };
+          this._lastShaderError = shaderError;
           console.error(`[RenderContext] Fragment shader error in ${layer.id}:`, msg.message, `(line ${msg.lineNum}, col ${msg.linePos})`);
           console.error(`[RenderContext] Fragment shader code:\n${fragmentShader}`);
+          this.emit('shader:error', { layerId: layer.id, error: shaderError });
           this.emit('error', { error: new Error(`Fragment shader error: ${msg.message}`) });
+          this.stop();
           return;
         } else if (msg.type === 'warning') {
           console.warn(`[RenderContext] Fragment shader warning in ${layer.id}:`, msg.message);
@@ -589,7 +647,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
           bindEntries.push({
             binding: bindingIndex,
-            resource: this.placeholderTexture!.createView(), // Placeholder for now
+            resource: this.placeholderTextureView!, // Placeholder for now
           });
           bindingIndex++;
           bindEntries.push({
@@ -711,7 +769,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       if (needed) {
         bindEntries.push({
           binding: bindingIndex,
-          resource: this.placeholderTexture!.createView(),
+          resource: this.placeholderTextureView!,
         });
         bindingIndex++;
         bindEntries.push({
@@ -808,6 +866,12 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+    // Close the high FPS channel to stop MessageChannel-based rendering
+    if (this.highFpsChannel) {
+      this.highFpsChannel.port1.close();
+      this.highFpsChannel.port2.close();
+      this.highFpsChannel = null;
+    }
   }
 
   /**
@@ -865,7 +929,11 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       clearPass.end();
     } else {
       // Render enabled layers with ping-pong for inputImage support
-      this.currentReadTexture = null;
+      // Track which texture contains the previous layer's output
+      // null = no previous output yet (first layer)
+      // 'A' = previous output is in texture A
+      // 'B' = previous output is in texture B
+      let previousOutputTexture: 'A' | 'B' | null = null;
 
       for (let i = 0; i < enabledLayers.length; i++) {
         const layerId = enabledLayers[i];
@@ -879,36 +947,53 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
         // Determine output target
         let outputView: GPUTextureView;
-        if (isLastLayer) {
-          // Last layer renders to canvas
+        let currentOutputTexture: 'A' | 'B' | null = null;
+
+        // All layers render to intermediate textures for proper blending
+        // Only single layer case renders directly to canvas
+        if (enabledLayers.length === 1) {
+          // Single layer - render directly to canvas
           outputView = textureView;
+          currentOutputTexture = null;
         } else {
-          // Intermediate layers render to ping-pong texture
-          if (this.currentReadTexture === 'A') {
+          // Multiple layers - all render to intermediate textures
+          // Write to the opposite texture of what we're reading from
+          if (previousOutputTexture === 'A') {
             outputView = this.intermediateTextureViewB!;
-            this.currentReadTexture = 'B';
+            currentOutputTexture = 'B';
           } else {
+            // previousOutputTexture is null or 'B'
             outputView = this.intermediateTextureViewA!;
-            this.currentReadTexture = 'A';
+            currentOutputTexture = 'A';
           }
         }
 
         // If this layer needs inputImage, bind the previous render result
-        if (hasInputImage && this.currentReadTexture && !isFirstLayer) {
-          const readView = this.currentReadTexture === 'A'
+        if (hasInputImage && previousOutputTexture && !isFirstLayer) {
+          const readView = previousOutputTexture === 'A'
             ? this.intermediateTextureViewA!
             : this.intermediateTextureViewB!;
 
-          // Update the texture view for inputImage
-          let perLayer = this.layerTextureViews.get(layer.id);
-          if (!perLayer) {
-            perLayer = new Map();
-            this.layerTextureViews.set(layer.id, perLayer);
-          }
-          perLayer.set('inputImage', readView);
+          // Check if we need to recreate bind group (only if inputImage changed)
+          const cached = this.bindGroupCache.get(layer.id);
+          if (!cached || cached.inputImageView !== readView) {
+            // Update the texture view for inputImage
+            let perLayer = this.layerTextureViews.get(layer.id);
+            if (!perLayer) {
+              perLayer = new Map();
+              this.layerTextureViews.set(layer.id, perLayer);
+            }
+            perLayer.set('inputImage', readView);
 
-          // Recreate bind group with updated inputImage texture
-          this.recreateBindGroupForLayer(layer);
+            // Recreate bind group with updated inputImage texture
+            this.recreateBindGroupForLayer(layer);
+
+            // Cache the new bind group
+            this.bindGroupCache.set(layer.id, {
+              bindGroup: layer.bindGroup!,
+              inputImageView: readView,
+            });
+          }
         }
 
         // Best-effort texture upload for other image inputs
@@ -924,7 +1009,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
           }
         }
 
-        // Update uniforms
+        // Update uniforms using double-buffered uniform buffer
         const uniformData = layer.getUniformData();
 
         // Fill built-in uniforms
@@ -939,13 +1024,15 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         // Padding for 16-byte alignment before date vec4
         uniformData[7] = 0;
 
-        // Date uniform
-        const date = new Date();
+        // Date uniform - cache date to avoid repeated allocations
+        const now = Date.now();
+        const date = new Date(now);
         uniformData[8] = date.getFullYear();
         uniformData[9] = date.getMonth();
         uniformData[10] = date.getDate();
         uniformData[11] = date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
 
+        // Write to layer's uniform buffer (WebGPU handles synchronization internally)
         this.device!.queue.writeBuffer(layer.uniformBuffer!, 0, uniformData.buffer);
 
         // Create render pass
@@ -964,6 +1051,27 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         renderPass.setBindGroup(0, layer.bindGroup!);
         renderPass.draw(3); // Full-screen triangle
         renderPass.end();
+
+        // Update previousOutputTexture for next layer to read from
+        // Only update if this layer wrote to an intermediate texture (not the final canvas)
+        if (currentOutputTexture) {
+          previousOutputTexture = currentOutputTexture;
+        }
+      }
+
+      // After all layers are rendered, copy the final result to canvas
+      // (only if we have multiple layers and rendered to intermediate textures)
+      if (enabledLayers.length > 1 && previousOutputTexture) {
+        const finalTexture = previousOutputTexture === 'A'
+          ? this.intermediateTextureA!
+          : this.intermediateTextureB!;
+
+        // Copy the final intermediate texture to the canvas
+        commandEncoder.copyTextureToTexture(
+          { texture: finalTexture },
+          { texture: this.context!.getCurrentTexture() },
+          { width: this.canvas.width, height: this.canvas.height }
+        );
       }
     }
 
@@ -975,7 +1083,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   }
 
   /**
-   * Main render loop
+   * Main render loop - optimized for high FPS
    */
   private renderLoop = (): void => {
     if (!this._isRunning) return;
@@ -983,8 +1091,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     const currentTime = performance.now();
     const elapsed = currentTime - this.lastFrameTime;
 
-    // FPS limiting - only render if enough time has passed
-    if (elapsed >= this.minFrameTime) {
+    // For unlimited FPS (fpsLimit = 0) or when enough time has passed
+    const shouldRender = this.fpsLimit === 0 || elapsed >= this.minFrameTime;
+
+    if (shouldRender) {
       this.renderFrame();
 
       // Update FPS counter
@@ -1014,8 +1124,39 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       this.lastFrameTime = currentTime;
     }
 
-    this.animationFrameId = requestAnimationFrame(this.renderLoop);
+    // Schedule next frame based on FPS target
+    if (this.fpsLimit === 0 || this.fpsLimit > 60) {
+      // For unlimited or high FPS targets, use faster scheduling
+      // MessageChannel provides ~0ms latency vs setTimeout's minimum ~4ms
+      if (!this.highFpsChannel) {
+        this.highFpsChannel = new MessageChannel();
+        this.highFpsChannel.port1.onmessage = () => {
+          if (this._isRunning) {
+            this.renderLoop();
+          }
+        };
+      }
+      this.highFpsChannel.port2.postMessage(null);
+    } else {
+      // For 60 FPS or below, use requestAnimationFrame for vsync
+      this.animationFrameId = requestAnimationFrame(this.renderLoop);
+    }
   };
+
+  /**
+   * Start render loop with high-performance mode
+   */
+  private startHighPerformanceLoop(): void {
+    if (!this.highFpsChannel) {
+      this.highFpsChannel = new MessageChannel();
+      this.highFpsChannel.port1.onmessage = () => {
+        if (this._isRunning) {
+          this.renderLoop();
+        }
+      };
+    }
+    this.highFpsChannel.port2.postMessage(null);
+  }
 
   /**
    * Get render statistics
@@ -1074,6 +1215,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.intermediateTextureB = null;
     this.intermediateTextureViewA = null;
     this.intermediateTextureViewB = null;
+
+    // Clear caches
+    this.bindGroupCache.clear();
+    this.layerTextureViews.clear();
 
     // Clear context
     this.context = null;
