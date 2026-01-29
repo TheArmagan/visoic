@@ -100,6 +100,8 @@ export class ShaderLayer extends EventEmitter<ShaderLayerEvents> {
           max: input.MAX,
           default: input.DEFAULT,
           label: input.LABEL,
+          labels: input.LABELS,
+          values: input.VALUES,
         };
         this.uniforms.set(input.NAME, def);
       }
@@ -193,7 +195,7 @@ export class ShaderLayer extends EventEmitter<ShaderLayerEvents> {
     // WGSL uniform buffers have strict alignment rules.
     // We pack built-ins and user uniforms with alignment so the generated WGSL struct matches.
     // Built-ins occupy 12 floats (48 bytes):
-    // time(1), timeDelta(1), renderSize(2), passIndex(1), frameIndex(1), padding(2), date(4)
+    // time(1), timeDelta(1), renderSize(2), passIndex(1), frameIndex(1), layerOpacity(1), padding(1), date(4)
     const builtInSizeFloats = 12;
 
     const floats: number[] = new Array(builtInSizeFloats).fill(0);
@@ -338,7 +340,12 @@ export class ShaderLayer extends EventEmitter<ShaderLayerEvents> {
   }
 
   set blendMode(value: BlendMode) {
-    this._blendMode = value;
+    if (this._blendMode !== value) {
+      this._blendMode = value;
+      // Reset pipeline so it gets recreated with new blend mode
+      this.pipeline = null;
+      this.bindGroup = null;
+    }
   }
 
   /**

@@ -59,6 +59,23 @@ export interface ColorChannelBindingConfig {
 }
 
 /**
+ * Vec2/point2D binding configuration
+ */
+export interface Vec2BindingConfig {
+  x?: UniformBindingConfig;
+  y?: UniformBindingConfig;
+}
+
+/**
+ * Vec3 binding configuration
+ */
+export interface Vec3BindingConfig {
+  x?: UniformBindingConfig;
+  y?: UniformBindingConfig;
+  z?: UniformBindingConfig;
+}
+
+/**
  * Shader uniform configuration with optional binding
  */
 export interface ShaderUniformConfig {
@@ -67,6 +84,8 @@ export interface ShaderUniformConfig {
   value: number | boolean | number[];
   binding?: UniformBindingConfig;           // For number types
   colorBinding?: ColorChannelBindingConfig; // For color/vec4 types
+  vec2Binding?: Vec2BindingConfig;          // For vec2/point2D types
+  vec3Binding?: Vec3BindingConfig;          // For vec3 types
 }
 
 /**
@@ -171,8 +190,8 @@ export class ConfigManager extends EventEmitter<ConfigEventMap> {
   /**
    * Initialize the config manager by loading saved config
    */
-  initialize(): AppConfig {
-    this.load();
+  async initialize(): Promise<AppConfig> {
+    await this.load();
 
     if (this.config.settings.autoSave) {
       this.enableAutoSave(this.config.settings.autoSaveInterval);
@@ -186,32 +205,48 @@ export class ConfigManager extends EventEmitter<ConfigEventMap> {
   // --------------------------------------------------------------------------
 
   /**
-   * Save current config to localStorage
+   * Save current config to file
    */
-  save(): void {
+  async save(): Promise<void> {
     try {
-      const json = JSON.stringify(this.config);
-      localStorage.setItem(CONFIG_STORAGE_KEY, json);
       this.isDirty = false;
-      this.emit('save', this.config);
-      console.log('[ConfigManager] Config saved');
+      const api = (window as any).VISOICNative;
+      if (api?.config?.save) {
+        await api.config.save(this.config);
+        this.emit('save', this.config);
+        console.log('[ConfigManager] Config saved');
+      } else {
+        // Fallback or dev mode without context bridge
+        const json = JSON.stringify(this.config);
+        localStorage.setItem(CONFIG_STORAGE_KEY, json);
+        this.emit('save', this.config);
+        console.log('[ConfigManager] Config saved to localStorage (fallback)');
+      }
     } catch (error) {
       console.error('[ConfigManager] Failed to save config:', error);
+      this.isDirty = true;
     }
   }
 
   /**
-   * Load config from localStorage
+   * Load config from file
    */
-  load(): AppConfig {
+  async load(): Promise<AppConfig> {
     this.isLoading = true;
 
     try {
-      const json = localStorage.getItem(CONFIG_STORAGE_KEY);
+      let loaded: AppConfig | null = null;
 
-      if (json) {
-        const loaded = JSON.parse(json) as AppConfig;
+      const api = (window as any).VISOICNative;
+      if (api?.config?.load) {
+        loaded = await api.config.load();
+      } else {
+        // Fallback
+        const json = localStorage.getItem(CONFIG_STORAGE_KEY);
+        if (json) loaded = JSON.parse(json) as AppConfig;
+      }
 
+      if (loaded) {
         // Version migration if needed
         if (loaded.version < CONFIG_VERSION) {
           this.config = this.migrateConfig(loaded);

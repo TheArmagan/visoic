@@ -78,6 +78,33 @@ function createWindow() {
   });
 
   // ==========================================
+  // Config Persistence
+  // ==========================================
+
+  const configPath = path.join(app.getPath('userData'), 'visoic-config.json');
+
+  ipcMain.handle('config:save', async (_event, config: unknown) => {
+    try {
+      const tempPath = `${configPath}.tmp`;
+      await fs.writeFile(tempPath, JSON.stringify(config, null, 2));
+      await fs.rename(tempPath, configPath);
+      return true;
+    } catch (error) {
+      console.error('Failed to save config:', error);
+      return false;
+    }
+  });
+
+  ipcMain.handle('config:load', async () => {
+    try {
+      const data = await fs.readFile(configPath, 'utf-8');
+      return JSON.parse(data);
+    } catch (error) {
+      return null;
+    }
+  });
+
+  // ==========================================
   // ISF Shader File System API
   // ==========================================
 

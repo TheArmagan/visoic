@@ -50,7 +50,7 @@ class AudioValueBridge {
     }
 
     // Initialize config manager
-    configManager.initialize();
+    await configManager.initialize();
 
     // Listen to all data events
     this.globalUnsubscribe = () => {
@@ -272,6 +272,8 @@ class AudioValueBridge {
         label: config.label ?? handle.id,
         normalizationEnabled: config.normalizationEnabled ?? false,
       });
+      // Immediately save to ensure persistence
+      configManager.save();
     }
 
     return handle;
@@ -312,6 +314,8 @@ class AudioValueBridge {
           smoothingTimeConstant: config.smoothingTimeConstant ?? existingConfig.smoothingTimeConstant,
           gain: config.gain ?? existingConfig.gain,
         });
+        // Immediately save to ensure persistence
+        configManager.save();
       }
     }
 
@@ -338,6 +342,8 @@ class AudioValueBridge {
     // Remove from config (skip during restore)
     if (!this.isRestoring) {
       configManager.removeAnalyzer(id);
+      // Immediately save to ensure persistence
+      configManager.save();
     }
 
     return true;
@@ -400,6 +406,8 @@ class AudioValueBridge {
         valueMin: options.min ?? 0,
         valueMax: options.max ?? 1,
       });
+      // Immediately save to ensure persistence
+      configManager.save();
     }
   }
 
@@ -416,6 +424,8 @@ class AudioValueBridge {
     // Remove from config (skip during restore)
     if (!this.isRestoring) {
       configManager.removeBinding(valueId);
+      // Immediately save to ensure persistence
+      configManager.save();
     }
 
     return true;

@@ -10,6 +10,10 @@ contextBridge.exposeInMainWorld('VISOICNative', {
   invoke: (channel: string, data?: unknown) => {
     return ipcRenderer.invoke(channel, data);
   },
+  config: {
+    save: (config: unknown): Promise<boolean> => ipcRenderer.invoke('config:save', config),
+    load: (): Promise<unknown | null> => ipcRenderer.invoke('config:load'),
+  },
   frame: {
     minimize: () => ipcRenderer.send('frame-minimize'),
     maximize: () => ipcRenderer.send('frame-maximize'),

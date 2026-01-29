@@ -51,6 +51,13 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private placeholderSampler: GPUSampler | null = null;
   private layerTextureViews: Map<string, Map<string, GPUTextureView>> = new Map();
 
+  // Intermediate textures for layer compositing (ping-pong pattern)
+  private intermediateTextureA: GPUTexture | null = null;
+  private intermediateTextureB: GPUTexture | null = null;
+  private intermediateTextureViewA: GPUTextureView | null = null;
+  private intermediateTextureViewB: GPUTextureView | null = null;
+  private currentReadTexture: 'A' | 'B' | null = null;
+
   constructor(config: RenderContextConfig) {
     super();
     this.id = config.id;
@@ -89,6 +96,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.lastRenderTime = this.startTime;
 
     this.createPlaceholderTexture();
+    this.createIntermediateTextures();
   }
 
   private createPlaceholderTexture(): void {
@@ -119,6 +127,34 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
     });
+  }
+
+  private createIntermediateTextures(): void {
+    if (!this.device) return;
+
+    const size = {
+      width: this.canvas.width,
+      height: this.canvas.height,
+      depthOrArrayLayers: 1,
+    };
+
+    this.intermediateTextureA = this.device.createTexture({
+      label: `${this.id}-intermediate-A`,
+      size,
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    this.intermediateTextureB = this.device.createTexture({
+      label: `${this.id}-intermediate-B`,
+      size,
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    this.intermediateTextureViewA = this.intermediateTextureA.createView();
+    this.intermediateTextureViewB = this.intermediateTextureB.createView();
+    this.currentReadTexture = null;
   }
 
   private getLayerTextureView(layer: ShaderLayer, name: string): GPUTextureView {
@@ -223,6 +259,9 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         format: this.format,
         alphaMode: 'premultiplied',
       });
+
+      // Recreate intermediate textures with new size
+      this.createIntermediateTextures();
     }
 
     this.emit('resize', { width, height });
@@ -422,6 +461,34 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         bindingIndex++;
       }
 
+      // Multi-pass Textures Layout
+      const passes = layer.getCompileResult()?.passes || [];
+      const fragShader = layer.getCompileResult()?.fragmentShader || '';
+
+      for (let i = 0; i < passes.length; i++) {
+        const passName = `pass${i + 1}`;
+        const targetName = passes[i].target;
+
+        let needed = false;
+        if (fragShader.includes(`var ${passName}: texture_2d<f32>`)) needed = true;
+        if (targetName && fragShader.includes(`var ${targetName}: texture_2d<f32>`)) needed = true;
+
+        if (needed) {
+          entries.push({
+            binding: bindingIndex,
+            visibility: GPUShaderStage.FRAGMENT,
+            texture: { sampleType: 'float' },
+          });
+          bindingIndex++;
+          entries.push({
+            binding: bindingIndex,
+            visibility: GPUShaderStage.FRAGMENT,
+            sampler: { type: 'filtering' },
+          });
+          bindingIndex++;
+        }
+      }
+
       const bindGroupLayout = this.device.createBindGroupLayout({
         label: `${layer.id}-bind-group-layout`,
         entries,
@@ -467,6 +534,8 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       // Use placeholder resources for images; best-effort external uploads happen during render.
       if (!this.placeholderSampler) this.createPlaceholderTexture();
       bindingIndex = 1;
+
+      // User Input Images
       for (const img of imageInputs) {
         bindEntries.push({
           binding: bindingIndex,
@@ -480,6 +549,57 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         bindingIndex++;
       }
 
+      // Multi-pass Textures
+      // We must bind textures for previous passes if they exist and are referenced
+      // The ISF parser generates bindings for passes it detects usage of.
+      // We must match that order.
+      // Since we don't have the exact list of DETECTED passes from Parser here easily without reparsing,
+      // we need a robust way to match bindings.
+      // Ideally, ISF Parser result should include "referencedTextures" or similar.
+      //
+      // For now, we will bind ALL available previous passes if the shader is multipass.
+      // Note: This relies on ISFParser also generating bindings for ALL passes or matching this logic.
+
+      // Reusing 'passes' and 'fragShader' from above
+
+      // Heuristic: bind passes that appear in the shader text
+      // Must match ISFParser.generateWGSL logic exactly
+      for (let i = 0; i < passes.length; i++) {
+        const passName = `pass${i + 1}`;
+        const targetName = passes[i].target;
+
+        let needed = false;
+        if (fragShader.includes(`var ${passName}: texture_2d<f32>`)) needed = true;
+        if (targetName && fragShader.includes(`var ${targetName}: texture_2d<f32>`)) needed = true;
+
+        // If we found the variable declaration in the generated shader, we MUST bind it
+        if (needed) {
+          // Find the texture for this pass. 
+          // Warning: pass textures are double-buffered or managed by the renderer.
+          // At creation time, they might not exist yet if this is the first frame setup.
+          // We use placeholder if not yet created.
+
+          // Note: multipass textures are typically managed in renderFrame or specialized buffers
+          // This initial bind group creation might be too early for dynamic pass textures?
+          // Actually, we can bind the placeholder for now and update later in render loop
+          // or ensure buffers are initialized.
+
+          // For now, bind placeholder. The render loop's `recreateBindGroupForLayer` 
+          // or specific per-frame bind group logic should handle the real textures.
+
+          bindEntries.push({
+            binding: bindingIndex,
+            resource: this.placeholderTexture!.createView(), // Placeholder for now
+          });
+          bindingIndex++;
+          bindEntries.push({
+            binding: bindingIndex,
+            resource: this.placeholderSampler!,
+          });
+          bindingIndex++;
+        }
+      }
+
       layer.bindGroup = this.device.createBindGroup({
         label: `${layer.id}-bind-group`,
         layout: bindGroupLayout,
@@ -489,6 +609,124 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       console.error(`Failed to create resources for layer ${layer.id}:`, error);
       this.emit('error', { error: error as Error });
     }
+  }
+
+  /**
+   * Recreate bind group for a layer (used when inputImage texture changes)
+   */
+  private recreateBindGroupForLayer(layer: ShaderLayer): void {
+    if (!this.device || !layer.pipeline || !layer.uniformBuffer) return;
+
+    const compileResult = layer.getCompileResult();
+    const inputs = compileResult?.inputs || [];
+    const imageInputs = inputs.filter(i => i.TYPE === 'image');
+    const passes = compileResult?.passes || [];
+    const fragShader = compileResult?.fragmentShader || '';
+
+    const entries: GPUBindGroupLayoutEntry[] = [
+      {
+        binding: 0,
+        visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+        buffer: { type: 'uniform' },
+      },
+    ];
+
+    let bindingIndex = 1;
+    for (const img of imageInputs) {
+      entries.push({
+        binding: bindingIndex,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: 'float' },
+      });
+      bindingIndex++;
+      entries.push({
+        binding: bindingIndex,
+        visibility: GPUShaderStage.FRAGMENT,
+        sampler: { type: 'filtering' },
+      });
+      bindingIndex++;
+    }
+
+    // Multi-pass Textures Layout
+    for (let i = 0; i < passes.length; i++) {
+      const passName = `pass${i + 1}`;
+      const targetName = passes[i].target;
+
+      let needed = false;
+      if (fragShader.includes(`var ${passName}: texture_2d<f32>`)) needed = true;
+      if (targetName && fragShader.includes(`var ${targetName}: texture_2d<f32>`)) needed = true;
+
+      if (needed) {
+        entries.push({
+          binding: bindingIndex,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: 'float' },
+        });
+        bindingIndex++;
+        entries.push({
+          binding: bindingIndex,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: 'filtering' },
+        });
+        bindingIndex++;
+      }
+    }
+
+    const bindGroupLayout = this.device.createBindGroupLayout({
+      label: `${layer.id}-bind-group-layout`,
+      entries,
+    });
+
+    const bindEntries: GPUBindGroupEntry[] = [
+      {
+        binding: 0,
+        resource: { buffer: layer.uniformBuffer },
+      },
+    ];
+
+    if (!this.placeholderSampler) this.createPlaceholderTexture();
+    bindingIndex = 1;
+    for (const img of imageInputs) {
+      bindEntries.push({
+        binding: bindingIndex,
+        resource: this.getLayerTextureView(layer, img.NAME),
+      });
+      bindingIndex++;
+      bindEntries.push({
+        binding: bindingIndex,
+        resource: this.placeholderSampler!,
+      });
+      bindingIndex++;
+    }
+
+    // Multi-pass Textures Resources
+    for (let i = 0; i < passes.length; i++) {
+      const passName = `pass${i + 1}`;
+      const targetName = passes[i].target;
+
+      let needed = false;
+      if (fragShader.includes(`var ${passName}: texture_2d<f32>`)) needed = true;
+      if (targetName && fragShader.includes(`var ${targetName}: texture_2d<f32>`)) needed = true;
+
+      if (needed) {
+        bindEntries.push({
+          binding: bindingIndex,
+          resource: this.placeholderTexture!.createView(),
+        });
+        bindingIndex++;
+        bindEntries.push({
+          binding: bindingIndex,
+          resource: this.placeholderSampler!,
+        });
+        bindingIndex++;
+      }
+    }
+
+    layer.bindGroup = this.device.createBindGroup({
+      label: `${layer.id}-bind-group`,
+      layout: bindGroupLayout,
+      entries: bindEntries,
+    });
   }
 
   /**
@@ -597,6 +835,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     // Create command encoder
     const commandEncoder = this.device.createCommandEncoder();
 
+    // Rebuild resources for layers that need it (e.g., blend mode changed)
+    for (const layerId of this.layerOrder) {
+      const layer = this.layers.get(layerId);
+      if (layer?.enabled && layer.isCompiled() && !layer.pipeline) {
+        this.createLayerResources(layer);
+      }
+    }
+
     // Check if we have any enabled layers with valid pipelines
     const enabledLayers = this.layerOrder.filter(id => {
       const layer = this.layers.get(id);
@@ -618,14 +864,57 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       });
       clearPass.end();
     } else {
-      // Render enabled layers
-      let isFirstLayer = true;
-      for (const layerId of enabledLayers) {
-        const layer = this.layers.get(layerId)!;
+      // Render enabled layers with ping-pong for inputImage support
+      this.currentReadTexture = null;
 
-        // Best-effort texture upload for image inputs (if any)
+      for (let i = 0; i < enabledLayers.length; i++) {
+        const layerId = enabledLayers[i];
+        const layer = this.layers.get(layerId)!;
+        const isFirstLayer = i === 0;
+        const isLastLayer = i === enabledLayers.length - 1;
+
+        // Check if this layer has inputImage input
+        const inputs = layer.getCompileResult()?.inputs || [];
+        const hasInputImage = inputs.some(inp => inp.NAME === 'inputImage' && inp.TYPE === 'image');
+
+        // Determine output target
+        let outputView: GPUTextureView;
+        if (isLastLayer) {
+          // Last layer renders to canvas
+          outputView = textureView;
+        } else {
+          // Intermediate layers render to ping-pong texture
+          if (this.currentReadTexture === 'A') {
+            outputView = this.intermediateTextureViewB!;
+            this.currentReadTexture = 'B';
+          } else {
+            outputView = this.intermediateTextureViewA!;
+            this.currentReadTexture = 'A';
+          }
+        }
+
+        // If this layer needs inputImage, bind the previous render result
+        if (hasInputImage && this.currentReadTexture && !isFirstLayer) {
+          const readView = this.currentReadTexture === 'A'
+            ? this.intermediateTextureViewA!
+            : this.intermediateTextureViewB!;
+
+          // Update the texture view for inputImage
+          let perLayer = this.layerTextureViews.get(layer.id);
+          if (!perLayer) {
+            perLayer = new Map();
+            this.layerTextureViews.set(layer.id, perLayer);
+          }
+          perLayer.set('inputImage', readView);
+
+          // Recreate bind group with updated inputImage texture
+          this.recreateBindGroupForLayer(layer);
+        }
+
+        // Best-effort texture upload for other image inputs
         const textures = layer.getTextureInputs();
         for (const [name, src] of textures.entries()) {
+          if (name === 'inputImage') continue; // Skip inputImage, already handled
           if (!src) continue;
           const isImage = typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement;
           const isCanvas = typeof HTMLCanvasElement !== 'undefined' && src instanceof HTMLCanvasElement;
@@ -645,9 +934,9 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         uniformData[3] = this.canvas.height;  // renderSize.y
         uniformData[4] = 0;                   // passIndex (packed as f32)
         uniformData[5] = this.frameCount;     // frameIndex (packed as f32)
+        uniformData[6] = layer.opacity;       // layerOpacity
 
         // Padding for 16-byte alignment before date vec4
-        uniformData[6] = 0;
         uniformData[7] = 0;
 
         // Date uniform
@@ -663,7 +952,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         const renderPass = commandEncoder.beginRenderPass({
           colorAttachments: [
             {
-              view: textureView,
+              view: outputView,
               loadOp: isFirstLayer ? 'clear' : 'load',
               storeOp: 'store',
               clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -675,8 +964,6 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         renderPass.setBindGroup(0, layer.bindGroup!);
         renderPass.draw(3); // Full-screen triangle
         renderPass.end();
-
-        isFirstLayer = false;
       }
     }
 
@@ -779,6 +1066,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     }
     this.layers.clear();
     this.layerOrder = [];
+
+    // Clean up intermediate textures
+    this.intermediateTextureA?.destroy();
+    this.intermediateTextureB?.destroy();
+    this.intermediateTextureA = null;
+    this.intermediateTextureB = null;
+    this.intermediateTextureViewA = null;
+    this.intermediateTextureViewB = null;
 
     // Clear context
     this.context = null;

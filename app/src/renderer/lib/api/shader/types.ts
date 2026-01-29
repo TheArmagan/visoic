@@ -95,6 +95,8 @@ export interface UniformDefinition {
   max?: number;
   default?: UniformValue;
   label?: string;
+  labels?: string[];
+  values?: number[];
 }
 
 /**

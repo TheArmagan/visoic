@@ -60,6 +60,8 @@ export type {
   // Shader config types
   UniformBindingConfig,
   ColorChannelBindingConfig,
+  Vec2BindingConfig,
+  Vec3BindingConfig,
   ShaderUniformConfig,
   ShaderLayerSaveConfig,
   RenderContextSaveConfig,

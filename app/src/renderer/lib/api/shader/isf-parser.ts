@@ -46,8 +46,11 @@ export class ISFParser {
    * WGSL has no preprocessor, so we inline simple object-like macros (constants)
    * and function-like macros. This is not a full C preprocessor, but it covers
    * the majority of ISF shaders in the wild.
+   * 
+   * @param source - The GLSL source code
+   * @param uniformNames - Set of uniform names that should NOT be expanded (they are ISF inputs)
    */
-  private expandGLSLDefines(source: string): string {
+  private expandGLSLDefines(source: string, uniformNames: Set<string>): string {
     type FnDef = { name: string; args: string[]; body: string };
 
     const rawLines = source.split(/\r?\n/);
@@ -83,8 +86,14 @@ export class ISFParser {
       // Object-like: #define NAME body...
       const obj = line.match(/^\s*#define\s+(\w+)\s+(.+?)\s*$/);
       if (obj) {
-        objectDefines.set(obj[1], obj[2]);
-        outLines.push(`// (removed #define ${obj[1]} ...)`);
+        const macroName = obj[1];
+        // Skip macros that match ISF uniform names - these should use the uniform instead
+        if (uniformNames.has(macroName)) {
+          outLines.push(`// (skipped #define ${macroName} - using uniform instead)`);
+          continue;
+        }
+        objectDefines.set(macroName, obj[2]);
+        outLines.push(`// (removed #define ${macroName} ...)`);
         continue;
       }
 
@@ -105,15 +114,42 @@ export class ISFParser {
       }
 
       // Expand object-like macros (constants).
+      // We need to avoid expanding inside comments.
       for (const [name, value] of objectDefines.entries()) {
-        const re = new RegExp(`\\b${this.escapeRegExp(name)}\\b`, 'g');
-        code = code.replace(re, `(${value})`);
+        code = this.expandObjectMacroSafe(code, name, value);
       }
 
       if (code === before) break;
     }
 
     return code;
+  }
+
+  /**
+   * Expand object-like macro while avoiding comments.
+   * This prevents recursive expansion when macro names appear in comment text.
+   */
+  private expandObjectMacroSafe(code: string, name: string, value: string): string {
+    const result: string[] = [];
+    const lines = code.split('\n');
+
+    for (const line of lines) {
+      // Find where the comment starts (if any)
+      const singleLineComment = line.indexOf('//');
+      const codePartEnd = singleLineComment >= 0 ? singleLineComment : line.length;
+
+      // Split line into code part and comment part
+      const codePart = line.slice(0, codePartEnd);
+      const commentPart = line.slice(codePartEnd);
+
+      // Only expand macros in the code part, not in comments
+      const re = new RegExp(`\\b${this.escapeRegExp(name)}\\b`, 'g');
+      const expandedCodePart = codePart.replace(re, `(${value})`);
+
+      result.push(expandedCodePart + commentPart);
+    }
+
+    return result.join('\n');
   }
 
   private expandFunctionLikeMacro(code: string, name: string, argNames: string[], body: string): string {
@@ -403,7 +439,8 @@ export class ISFParser {
     uniformStruct += '  renderSize: vec2<f32>,\n';
     uniformStruct += '  passIndex: f32,\n';
     uniformStruct += '  frameIndex: f32,\n';
-    uniformStruct += '  _pad0: vec2<f32>,\n';
+    uniformStruct += '  layerOpacity: f32,\n';
+    uniformStruct += '  _pad0: f32,\n';
     uniformStruct += '  date: vec4<f32>,\n';
 
     // Add user inputs to uniform struct
@@ -419,7 +456,7 @@ export class ISFParser {
     let bindings = '@group(0) @binding(0) var<uniform> uniforms: Uniforms;\n';
     let bindingIndex = 1;
 
-    // Add texture bindings for images
+    // Add texture bindings for images (user inputs)
     for (const input of inputs) {
       if (input.TYPE === 'image') {
         bindings += `@group(0) @binding(${bindingIndex}) var ${input.NAME}: texture_2d<f32>;\n`;
@@ -428,6 +465,93 @@ export class ISFParser {
         bindingIndex++;
       }
     }
+
+    // Add bindings for Multipass Targets (pass1, pass2, etc.)
+    // If we have passes, we might need access to previous pass outputs
+    const passes = this.metadata?.PASSES || [];
+    if (passes.length > 0) {
+      // Technically we should only bind passes that are actually used in the shader code
+      // But for simplicity, we can try to bind them if they correspond to valid previous passes
+      // In ISF, passes are usually named by their TARGET property, or implicitly passN
+
+      // For each pass, we potentially have a texture available
+      // The bindings here must match what RenderContext sets up
+      // Based on RenderContext implementation, it binds passes after user inputs
+
+      // Note: We scan the original source code to see if these passes are referenced
+      // to avoid declaring unused bindings (though unused bindings are generally handled by wgpu/dawn)
+
+      // Standard ISF pass names: pass1, pass2, etc. (referencing the OUTPUT of that pass)
+      // Also custom target names from TARGET property
+
+      const referencedPasses = new Set<string>();
+
+      // Simple regex to find texture usage: textureSample(NAME, ...) or just the name
+      // We look for pass names in the source code
+      // Default names are pass1, pass2... (referring to index 0, 1...)
+
+      for (let i = 0; i < passes.length; i++) {
+        const pass = passes[i];
+        const defaultName = `pass${i + 1}`; // pass1 is output of first pass (index 0)
+
+        if (this.fragmentMain.includes(defaultName)) {
+          referencedPasses.add(defaultName);
+        }
+
+        if (pass.TARGET && this.fragmentMain.includes(pass.TARGET)) {
+          referencedPasses.add(pass.TARGET);
+        }
+      }
+
+      // Generate bindings for referenced passes
+      // Important: The binding index MUST match the order expected by RenderContext
+      // RenderContext binds passes sequentially after inputs
+
+      // We will declare bindings for ALL potential passes to ensure indices align
+      // with RenderContext if it binds them blindly. 
+      // If RenderContext binds only used passes, we need to match that logic.
+      // Assuming RenderContext binds based on what the shader needs OR all previous passes.
+
+      // Let's assume we binding all previous passes for now, as that's safer for ISF logic
+      // where any pass can reference any previous pass.
+
+      // NOTE: We need to coordinate with render-context.ts.
+      // If render-context.ts binds ALL passes, we should declare ALL passes here?
+      // Or specific ones?
+
+      // Let's modify this to just ensure we have bindings for referenced passes
+      // We'll trust that render-context binds them in a predictable order
+      // usually: Uniforms (0), Inputs (1..N), Passes (N+1...)
+
+      // Actually, we can just iterate and add them if they appear in source
+      // effectively reserving binding slots
+
+      // Since we don't know EXACTLY what render-context does yet (user didn't share that part completely),
+      // we will implement a strategy that declares bindings for detected pass names
+      // and hope render-context matches the binding indices.
+
+      const detectedPassNames: string[] = [];
+
+      // Check for pass1, pass2, etc.
+      for (let i = 0; i < passes.length; i++) {
+        const pName = `pass${i + 1}`;
+        if (this.fragmentMain.includes(pName)) {
+          if (!detectedPassNames.includes(pName)) detectedPassNames.push(pName);
+        }
+        if (passes[i].TARGET && this.fragmentMain.includes(passes[i].TARGET)) {
+          const tName = passes[i].TARGET!;
+          if (!detectedPassNames.includes(tName)) detectedPassNames.push(tName);
+        }
+      }
+
+      for (const passName of detectedPassNames) {
+        bindings += `@group(0) @binding(${bindingIndex}) var ${passName}: texture_2d<f32>;\n`;
+        bindingIndex++;
+        bindings += `@group(0) @binding(${bindingIndex}) var ${passName}Sampler: sampler;\n`;
+        bindingIndex++;
+      }
+    }
+
     bindings += '\n';
 
     // Vertex shader
@@ -530,7 +654,44 @@ ${convertedMain}
    * Convert GLSL to WGSL (basic conversion)
    */
   private convertGLSLtoWGSL(glsl: string): string {
-    let wgsl = this.expandGLSLDefines(glsl);
+    // Get ISF uniform names to prevent macro expansion of these
+    const isfInputs = this.metadata?.INPUTS || [];
+    const uniformNames = new Set<string>(
+      isfInputs.filter(i => i.TYPE !== 'image').map(i => i.NAME)
+    );
+
+    let wgsl = this.expandGLSLDefines(glsl, uniformNames);
+
+    // Preserve comments by replacing them with placeholders before transformations
+    // This prevents regex replacements from corrupting comment content
+    const comments: string[] = [];
+    wgsl = wgsl.replace(/\/\/[^\n]*/g, (match) => {
+      const idx = comments.length;
+      comments.push(match);
+      return `__COMMENT_${idx}__`;
+    });
+    // Also preserve multi-line comments
+    wgsl = wgsl.replace(/\/\*[\s\S]*?\*\//g, (match) => {
+      const idx = comments.length;
+      comments.push(match);
+      return `__COMMENT_${idx}__`;
+    });
+
+    // Remove common ISF/Shadertoy alias variable declarations BEFORE type conversion.
+    // These create local aliases for built-ins that we handle via uniforms.
+    // Example: vec3 iResolution = vec3(RENDERSIZE, 1.); -> removed
+    // Example: float iTime = TIME; -> removed
+    wgsl = wgsl.replace(/^\s*vec3\s+iResolution\s*=\s*[^;]+;\s*$/gm, '// (removed iResolution alias - use uniforms.renderSize)');
+    wgsl = wgsl.replace(/^\s*vec2\s+iResolution\s*=\s*[^;]+;\s*$/gm, '// (removed iResolution alias - use uniforms.renderSize)');
+    wgsl = wgsl.replace(/^\s*float\s+iTime\s*=\s*[^;]+;\s*$/gm, '// (removed iTime alias - use uniforms.time)');
+    wgsl = wgsl.replace(/^\s*float\s+iTimeDelta\s*=\s*[^;]+;\s*$/gm, '// (removed iTimeDelta alias - use uniforms.timeDelta)');
+    wgsl = wgsl.replace(/^\s*float\s+iFrame\s*=\s*[^;]+;\s*$/gm, '// (removed iFrame alias - use uniforms.frameIndex)');
+    wgsl = wgsl.replace(/^\s*int\s+iFrame\s*=\s*[^;]+;\s*$/gm, '// (removed iFrame alias - use uniforms.frameIndex)');
+    wgsl = wgsl.replace(/^\s*vec4\s+iDate\s*=\s*[^;]+;\s*$/gm, '// (removed iDate alias - use uniforms.date)');
+    // Also handle resolution/time without 'i' prefix
+    wgsl = wgsl.replace(/^\s*vec3\s+resolution\s*=\s*[^;]+;\s*$/gm, '// (removed resolution alias - use uniforms.renderSize)');
+    wgsl = wgsl.replace(/^\s*vec2\s+resolution\s*=\s*[^;]+;\s*$/gm, '// (removed resolution alias - use uniforms.renderSize)');
+    wgsl = wgsl.replace(/^\s*float\s+time\s*=\s*[^;]+;\s*$/gm, '// (removed time alias - use uniforms.time)');
 
     // GLSL scalar casts look like function calls (e.g. `float(i)`).
     // In WGSL, scalar conversion uses type constructors (e.g. `f32(i)`).
@@ -565,6 +726,21 @@ ${convertedMain}
     // Convert GLSL variable declarations to WGSL format
     // GLSL: float x = 5.0;  ->  WGSL: var x: f32 = 5.0;
     // GLSL: vec2 pos = ...  ->  WGSL: var pos: vec2<f32> = ...
+    // GLSL: const mat3 m = ... -> WGSL: const m: mat3x3<f32> = ...
+
+    // First handle `const` declarations specially - WGSL uses `const name: TYPE` not `const TYPE name`
+    // Do this BEFORE the general variable declaration conversion
+    wgsl = wgsl.replace(/\bconst\s+(vec2|vec3|vec4|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|mat2|mat3|mat4|float|int|bool)\s+(\w+)\s*=/g,
+      (_, type, name) => {
+        const typeMap: Record<string, string> = {
+          'vec2': 'vec2<f32>', 'vec3': 'vec3<f32>', 'vec4': 'vec4<f32>',
+          'ivec2': 'vec2<i32>', 'ivec3': 'vec3<i32>', 'ivec4': 'vec4<i32>',
+          'uvec2': 'vec2<u32>', 'uvec3': 'vec3<u32>', 'uvec4': 'vec4<u32>',
+          'mat2': 'mat2x2<f32>', 'mat3': 'mat3x3<f32>', 'mat4': 'mat4x4<f32>',
+          'float': 'f32', 'int': 'i32', 'bool': 'bool'
+        };
+        return `const ${name}: ${typeMap[type] || type} =`;
+      });
 
     // First, replace types with temporary markers to avoid conflicts
     // Use negative lookahead to avoid matching types already in WGSL format (e.g., vec2<f32>)
@@ -587,10 +763,14 @@ ${convertedMain}
     wgsl = wgsl.replace(/\bint\s+(?=\w)(?!\s*\()/g, '__INT__ ');
     wgsl = wgsl.replace(/\bbool\s+(?=\w)/g, '__BOOL__ ');
 
-    // Convert variable declarations: TYPE name = value; -> var name: TYPE = value;
-    // Match: __TYPE__ identifier = (not inside function params)
+    // Convert variable declarations WITH initialization: TYPE name = value; -> var name: TYPE = value;
     wgsl = wgsl.replace(/(__VEC2__|__VEC3__|__VEC4__|__IVEC2__|__IVEC3__|__IVEC4__|__UVEC2__|__UVEC3__|__UVEC4__|__MAT2__|__MAT3__|__MAT4__|__FLOAT__|__INT__|__BOOL__)\s+(\w+)\s*=/g,
       'var $2: $1 =');
+
+    // Convert variable declarations WITHOUT initialization: TYPE name; -> var name: TYPE;
+    // Match: TYPE identifier; (at end of statement, not followed by =)
+    wgsl = wgsl.replace(/(__VEC2__|__VEC3__|__VEC4__|__IVEC2__|__IVEC3__|__IVEC4__|__UVEC2__|__UVEC3__|__UVEC4__|__MAT2__|__MAT3__|__MAT4__|__FLOAT__|__INT__|__BOOL__)\s+(\w+)\s*;/g,
+      'var $2: $1;');
 
     // Now replace markers with actual WGSL types
     wgsl = wgsl.replace(/__VEC2__/g, 'vec2<f32>');
@@ -608,6 +788,10 @@ ${convertedMain}
     wgsl = wgsl.replace(/__FLOAT__/g, 'f32');
     wgsl = wgsl.replace(/__INT__/g, 'i32');
     wgsl = wgsl.replace(/__BOOL__/g, 'bool');
+
+    // Split comma-separated variable declarations into separate statements
+    // GLSL: var a: f32 = 1.0, b = 2.0, c = 3.0;  ->  var a: f32 = 1.0; var b: f32 = 2.0; var c: f32 = 3.0;
+    wgsl = this.splitCommaVariableDeclarations(wgsl);
 
     // Replace built-in functions
     wgsl = wgsl.replace(/\bclamp\s*\(/g, 'clamp(');
@@ -689,10 +873,15 @@ ${convertedMain}
     wgsl = wgsl.replace(/(?<!\.)\biFrame\b(?!\()/g, 'f32(uniforms.frameIndex)');
 
     // Replace user uniforms
+    // But first, we need to avoid replacing parameter local copies
+    // Parameter local copies are: var name: TYPE = name_in;
+    // We should not replace the "name" in variable declarations that are followed by "_in"
     const inputs = this.metadata?.INPUTS || [];
     for (const input of inputs) {
       if (input.TYPE !== 'image') {
-        const regex = new RegExp(`\\b${input.NAME}\\b(?!\\()`, 'g');
+        // Negative lookahead to avoid replacing in "var name: TYPE = name_in" pattern
+        // Also avoid replacing when preceded by "var " (variable declaration of same name)
+        const regex = new RegExp(`(?<!var\\s+)\\b${input.NAME}\\b(?!_in)(?!\\()`, 'g');
         wgsl = wgsl.replace(regex, `uniforms.${input.NAME}`);
       }
     }
@@ -718,6 +907,28 @@ ${convertedMain}
     // We handle common statement forms used in ISF shaders.
     wgsl = this.convertTernaryToSelect(wgsl);
 
+    // WGSL requires braces for if/else statements - convert single-line if/else to braced form
+    wgsl = this.addBracesToIfStatements(wgsl);
+
+    // Fix swizzle assignments - WGSL doesn't support assigning to swizzles like var.rgb = expr
+    wgsl = this.fixSwizzleAssignments(wgsl);
+
+    // Fix clamp() calls with scalar min/max on vectors
+    // WGSL requires: clamp(vec4, vec4, vec4), not clamp(vec4, scalar, scalar)
+    wgsl = this.fixClampCalls(wgsl);
+
+    // Fix smoothstep() calls with scalar edge0/edge1 on vectors
+    // WGSL requires: smoothstep(vec3, vec3, vec3), not smoothstep(scalar, scalar, vec3)
+    wgsl = this.fixSmoothstepCalls(wgsl);
+
+    // Fix C-style array declarations
+    // vec4<f32> arr[9]; -> var arr: array<vec4<f32>, 9>;
+    wgsl = this.fixArrayDeclarations(wgsl);
+
+    // Fix module-scope var declarations - WGSL requires address space
+    // This must happen before main() conversion to identify module-scope vars
+    wgsl = this.fixModuleScopeVarDeclarations(wgsl);
+
     // Convert main function - handle both void main() and void main(void)
     wgsl = wgsl.replace(
       /void\s+main\s*\(\s*(void)?\s*\)\s*\{/,
@@ -726,12 +937,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   var outputColor: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);`
     );
 
-    // Fix `const TYPE name = ...;` to WGSL `const name: TYPE = ...;`
-    // Run after type-marker replacement so TYPE is already WGSL-ish.
-    wgsl = wgsl.replace(/\bconst\s+([A-Za-z0-9_<>,]+)\s+(\w+)\s*=/g, 'const $2: $1 =');
-
     // Ensure fs_main returns outputColor at its actual closing brace (not the last brace in the file).
     wgsl = this.ensureFsMainReturn(wgsl);
+
+    // Restore comments from placeholders
+    for (let i = 0; i < comments.length; i++) {
+      wgsl = wgsl.replace(`__COMMENT_${i}__`, comments[i]);
+    }
 
     return wgsl;
   }
@@ -841,9 +1053,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (closeIdx === -1) return code;
 
     const beforeClose = code.slice(0, closeIdx);
-    if (/\breturn\s+outputColor\s*;\s*$/.test(beforeClose)) return code;
+    // Check if there's already a return with opacity applied
+    if (/\breturn\s+vec4.*layerOpacity\s*\)\s*;\s*$/.test(beforeClose)) return code;
+    // Check if there's already a simple return outputColor
+    if (/\breturn\s+outputColor\s*;\s*$/.test(beforeClose)) {
+      // Replace it with opacity-applied version
+      return code.slice(0, closeIdx).replace(
+        /\breturn\s+outputColor\s*;\s*$/,
+        'return vec4<f32>(outputColor.rgb, outputColor.a * uniforms.layerOpacity);\n'
+      ) + code.slice(closeIdx);
+    }
 
-    return code.slice(0, closeIdx) + '\n  return outputColor;\n' + code.slice(closeIdx);
+    return code.slice(0, closeIdx) + '\n  return vec4<f32>(outputColor.rgb, outputColor.a * uniforms.layerOpacity);\n' + code.slice(closeIdx);
   }
 
   /**
@@ -900,6 +1121,63 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       'mat4': 'mat4x4<f32>',
     };
 
+    let result = code;
+
+    // Special handling for Shadertoy-style mainImage function
+    // void mainImage(out vec4 fragColor, in vec2 fragCoord) { ... }
+    // We need to convert this to use a pointer for the out parameter
+    const mainImageRegex = /\bvoid\s+mainImage\s*\(\s*(?:out\s+)?vec4\s+(\w+)\s*,\s*(?:in\s+)?vec2\s+(\w+)\s*\)\s*\{/;
+    const mainImageMatch = result.match(mainImageRegex);
+
+    if (mainImageMatch) {
+      const fragColorName = mainImageMatch[1]; // Usually 'fragColor'
+      const fragCoordName = mainImageMatch[2]; // Usually 'fragCoord'
+
+      // Replace the function declaration with pointer version
+      result = result.replace(
+        mainImageRegex,
+        `fn mainImage(${fragColorName}_ptr: ptr<function, vec4<f32>>, ${fragCoordName}: vec2<f32>) {\n  var ${fragColorName} = *${fragColorName}_ptr;`
+      );
+
+      // Find the closing brace of mainImage and add the pointer write-back
+      // This is a simple heuristic - find mainImage and track braces
+      const mainImageIdx = result.indexOf('fn mainImage(');
+      if (mainImageIdx !== -1) {
+        let braceDepth = 0;
+        let foundOpen = false;
+        let closeIdx = -1;
+
+        for (let i = mainImageIdx; i < result.length; i++) {
+          if (result[i] === '{') {
+            braceDepth++;
+            foundOpen = true;
+          } else if (result[i] === '}') {
+            braceDepth--;
+            if (foundOpen && braceDepth === 0) {
+              closeIdx = i;
+              break;
+            }
+          }
+        }
+
+        if (closeIdx !== -1) {
+          // Insert the pointer write-back before the closing brace
+          result = result.slice(0, closeIdx) + `\n  *${fragColorName}_ptr = ${fragColorName};\n` + result.slice(closeIdx);
+        }
+      }
+
+      // Update the call to mainImage to pass a pointer
+      // mainImage(outputColor, fragCoord) -> mainImage(&outputColor, fragCoord)
+      result = result.replace(
+        /\bmainImage\s*\(\s*(\w+)\s*,/g,
+        (match, firstArg) => {
+          // Only replace calls, not the function definition
+          if (firstArg === fragColorName + '_ptr') return match;
+          return `mainImage(&${firstArg},`;
+        }
+      );
+    }
+
     // Regular expression to match GLSL function declarations
     // Matches: returnType funcName(params) { (with flexible whitespace)
     // Using more specific type names to avoid partial matches
@@ -909,22 +1187,33 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       'g'
     );
 
-    return code.replace(funcRegex, (match, returnType, funcName, params) => {
+    return result.replace(funcRegex, (match, returnType, funcName, params) => {
       // Skip main function - it's handled separately
       if (funcName === 'main') {
         return match;
       }
 
-      // Convert parameters
-      const convertedParams = this.convertFunctionParams(params, typeMap);
+      // Skip mainImage - already handled above
+      if (funcName === 'mainImage') {
+        return match;
+      }
+
+      // Convert parameters - returns both param string and list of mutable params
+      const { params: convertedParams, mutableParams } = this.convertFunctionParams(params, typeMap);
 
       // Build WGSL function declaration
       const wgslReturnType = typeMap[returnType] || 'f32';
 
+      // Create local variable copies for mutable parameters
+      // WGSL function parameters are immutable, so we need local copies
+      // Use _local_ prefix to avoid collision with uniform names
+      const localVarDecls = mutableParams.map(p => `  var ${p.name}: ${p.type} = ${p.name}_in;`).join('\n');
+      const bodyPrefix = localVarDecls ? '\n' + localVarDecls : '';
+
       if (wgslReturnType === 'void') {
-        return `fn ${funcName}(${convertedParams}) {`;
+        return `fn ${funcName}(${convertedParams}) {${bodyPrefix}`;
       } else {
-        return `fn ${funcName}(${convertedParams}) -> ${wgslReturnType} {`;
+        return `fn ${funcName}(${convertedParams}) -> ${wgslReturnType} {${bodyPrefix}`;
       }
     });
   }
@@ -933,12 +1222,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
    * Convert GLSL function parameters to WGSL format
    * GLSL: float x, vec2 y, in vec3 z
    * WGSL: x: f32, y: vec2<f32>, z: vec3<f32>
+   * 
+   * Returns: { params: string, mutableParams: Array<{name: string, type: string}> }
+   * mutableParams contains parameters that need local copies in the function body
    */
-  private convertFunctionParams(params: string, typeMap: Record<string, string>): string {
-    if (!params.trim()) return '';
+  private convertFunctionParams(params: string, typeMap: Record<string, string>): { params: string; mutableParams: Array<{ name: string, type: string }> } {
+    if (!params.trim()) return { params: '', mutableParams: [] };
 
     const paramList = params.split(',').map(p => p.trim()).filter(p => p);
     const typePattern = 'void|float|int|bool|vec2|vec3|vec4|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|mat2|mat3|mat4';
+    const mutableParams: Array<{ name: string, type: string }> = [];
 
     const converted = paramList.map(param => {
       // Remove in/out/inout qualifiers
@@ -950,7 +1243,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (match) {
         const [, type, name] = match;
         const wgslType = typeMap[type] || 'f32';
-        return `${name}: ${wgslType}`;
+        // Mark all non-const parameters as potentially mutable
+        mutableParams.push({ name, type: wgslType });
+        // Rename parameter to _in suffix, we'll create local copy in body
+        return `${name}_in: ${wgslType}`;
       }
 
       // If we couldn't parse it, return as-is (might cause errors but better than losing it)
@@ -958,7 +1254,533 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       return param;
     });
 
-    return converted.join(', ');
+    return { params: converted.join(', '), mutableParams };
+  }
+
+  /**
+   * Add braces to if/else statements that don't have them.
+   * WGSL requires braces for all if/else bodies.
+   * GLSL: if (cond) statement;  ->  WGSL: if (cond) { statement; }
+   */
+  private addBracesToIfStatements(code: string): string {
+    let result = code;
+
+    // Match: if (condition) followed by a statement (not a brace)
+    // This regex finds: if (...) statement; where statement doesn't start with {
+    // We need to handle nested parentheses in the condition
+    let safety = 0;
+    const maxIterations = 500;
+
+    while (safety < maxIterations) {
+      safety++;
+
+      // Find "if" followed by condition in parentheses
+      const ifMatch = result.match(/\bif\s*\(/);
+      if (!ifMatch || ifMatch.index === undefined) break;
+
+      const ifStart = ifMatch.index;
+      const condStart = ifStart + ifMatch[0].length - 1; // Position of opening (
+
+      // Find the matching closing parenthesis
+      let depth = 1;
+      let condEnd = condStart + 1;
+      while (condEnd < result.length && depth > 0) {
+        if (result[condEnd] === '(') depth++;
+        else if (result[condEnd] === ')') depth--;
+        condEnd++;
+      }
+
+      if (depth !== 0) break; // Unbalanced parentheses
+
+      // Now condEnd is right after the closing )
+      // Check what comes after: whitespace, then either { or a statement
+      const afterCond = result.slice(condEnd);
+      const wsMatch = afterCond.match(/^\s*/);
+      const wsLen = wsMatch ? wsMatch[0].length : 0;
+      const afterWs = afterCond.slice(wsLen);
+
+      if (afterWs.startsWith('{')) {
+        // Already has braces, skip this if statement
+        // Move past it to find the next one
+        result = result.slice(0, ifStart) + '__IF_PROCESSED__' + result.slice(ifStart + 2);
+        continue;
+      }
+
+      // Find the statement (everything up to ; or { for nested structures)
+      // Handle the case where it's another if/for/while without braces
+      let stmtEnd = 0;
+      if (afterWs.match(/^(if|for|while)\s*\(/)) {
+        // Nested control structure - we'll handle it in the next iteration
+        // For now, skip this if
+        result = result.slice(0, ifStart) + '__IF_PROCESSED__' + result.slice(ifStart + 2);
+        continue;
+      }
+
+      // Find the semicolon that ends this statement
+      // But be careful of semicolons inside strings or nested structures
+      let semiPos = 0;
+      let braceDepth = 0;
+      let parenDepth = 0;
+      while (semiPos < afterWs.length) {
+        const ch = afterWs[semiPos];
+        if (ch === '(') parenDepth++;
+        else if (ch === ')') parenDepth--;
+        else if (ch === '{') braceDepth++;
+        else if (ch === '}') braceDepth--;
+        else if (ch === ';' && braceDepth === 0 && parenDepth === 0) {
+          break;
+        }
+        semiPos++;
+      }
+
+      if (semiPos >= afterWs.length) {
+        // No semicolon found, skip
+        result = result.slice(0, ifStart) + '__IF_PROCESSED__' + result.slice(ifStart + 2);
+        continue;
+      }
+
+      // Extract the statement and wrap it in braces
+      const statement = afterWs.slice(0, semiPos + 1);
+      const beforeIf = result.slice(0, condEnd);
+      const afterStatement = result.slice(condEnd + wsLen + semiPos + 1);
+
+      result = beforeIf + ' { ' + statement + ' }' + afterStatement;
+    }
+
+    // Restore the if keywords
+    result = result.replace(/__IF_PROCESSED__/g, 'if');
+
+    // Now handle else without braces
+    // Match: } else statement; (not } else { or } else if)
+    // The negative lookahead excludes both { and if
+    result = result.replace(
+      /\}\s*else\s+(?!\{)(?!if\b)([^;]+;)/g,
+      '} else { $1 }'
+    );
+
+    return result;
+  }
+
+  /**
+   * Split comma-separated variable declarations into separate statements.
+   * GLSL allows: float a = 1.0, b = 2.0, c = 3.0;
+   * WGSL requires: var a: f32 = 1.0; var b: f32 = 2.0; var c: f32 = 3.0;
+   */
+  private splitCommaVariableDeclarations(code: string): string {
+    const wgslTypes = ['f32', 'i32', 'u32', 'bool',
+      'vec2<f32>', 'vec3<f32>', 'vec4<f32>',
+      'vec2<i32>', 'vec3<i32>', 'vec4<i32>',
+      'vec2<u32>', 'vec3<u32>', 'vec4<u32>',
+      'mat2x2<f32>', 'mat3x3<f32>', 'mat4x4<f32>'];
+
+    let result = code;
+
+    // Match: var name: TYPE = expr, name2 = expr2, ...;
+    // We need to find these and split them
+    for (const type of wgslTypes) {
+      const escapedType = type.replace(/[<>]/g, '\\$&');
+      // Pattern: var identifier: TYPE = something, identifier = something, ... ;
+      const pattern = new RegExp(
+        `var\\s+(\\w+)\\s*:\\s*${escapedType}\\s*=\\s*([^;]+);`,
+        'g'
+      );
+
+      result = result.replace(pattern, (match, firstName, restOfDecl) => {
+        // Check if there are commas outside of parentheses/brackets
+        const parts = this.splitByTopLevelComma(restOfDecl);
+
+        if (parts.length === 1) {
+          // No comma-separated declarations
+          return match;
+        }
+
+        // First part is the value for the first variable
+        const statements: string[] = [];
+        statements.push(`var ${firstName}: ${type} = ${parts[0].trim()};`);
+
+        // Remaining parts are: name = value
+        for (let i = 1; i < parts.length; i++) {
+          const part = parts[i].trim();
+          const assignMatch = part.match(/^(\w+)\s*=\s*(.+)$/);
+          if (assignMatch) {
+            statements.push(`var ${assignMatch[1]}: ${type} = ${assignMatch[2]};`);
+          } else {
+            // Just a variable name without initialization
+            const nameMatch = part.match(/^(\w+)$/);
+            if (nameMatch) {
+              statements.push(`var ${nameMatch[1]}: ${type};`);
+            } else {
+              // Can't parse, keep as comment
+              statements.push(`/* unparsed: ${part} */`);
+            }
+          }
+        }
+
+        return statements.join(' ');
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Split a string by commas, but only at the top level (not inside parentheses, brackets, etc.)
+   */
+  private splitByTopLevelComma(str: string): string[] {
+    const parts: string[] = [];
+    let current = '';
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let angleDepth = 0;
+
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') parenDepth--;
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') bracketDepth--;
+      else if (ch === '<') angleDepth++;
+      else if (ch === '>') angleDepth--;
+      else if (ch === ',' && parenDepth === 0 && bracketDepth === 0 && angleDepth === 0) {
+        parts.push(current);
+        current = '';
+        continue;
+      }
+
+      current += ch;
+    }
+
+    if (current) {
+      parts.push(current);
+    }
+
+    return parts;
+  }
+
+  /**
+   * Fix clamp() calls where a vector is clamped with scalar min/max values.
+   * WGSL requires all arguments to be the same type.
+   * clamp(vec4(...), 0.0, 1.0) -> clamp(vec4(...), vec4<f32>(0.0), vec4<f32>(1.0))
+   */
+  private fixClampCalls(code: string): string {
+    // First, collect all variable declarations to know their types
+    const varTypes = new Map<string, string>();
+    const varDeclPattern = /\bvar\s+(\w+)\s*:\s*(vec[234]<f32>|vec[234])/g;
+    let match;
+    while ((match = varDeclPattern.exec(code)) !== null) {
+      const varName = match[1];
+      let varType = match[2];
+      // Normalize to just vec2/vec3/vec4
+      if (varType.includes('<')) {
+        varType = varType.split('<')[0];
+      }
+      varTypes.set(varName, varType);
+    }
+
+    let result = code;
+    let safety = 0;
+    const maxIterations = 1000;
+
+    while (safety < maxIterations) {
+      safety++;
+
+      // Find clamp( 
+      const clampMatch = result.match(/\bclamp\s*\(/);
+      if (!clampMatch || clampMatch.index === undefined) break;
+
+      const clampStart = clampMatch.index;
+      const argsStart = clampStart + clampMatch[0].length;
+
+      // Parse the arguments
+      const parsed = this.parseParenInvocationArgs(result, clampStart + 'clamp'.length);
+      if (!parsed || parsed.args.length !== 3) {
+        // Can't parse or wrong number of args, skip
+        result = result.slice(0, clampStart) + '__CLAMP_PROCESSED__' + result.slice(clampStart + 5);
+        continue;
+      }
+
+      const [arg1, arg2, arg3] = parsed.args.map(a => a.trim());
+
+      // Check if arg2 and arg3 look like scalars (numbers)
+      const looksLikeScalar = (s: string) => {
+        const trimmed = s.trim();
+        // Is it a number? Match: 0, 0.0, .5, 0., 1.0f, -0.5, etc.
+        if (/^-?\d*\.?\d*f?$/.test(trimmed) && /\d/.test(trimmed)) return true;
+        return false;
+      };
+
+      // Detect vector type from first argument
+      // We need to find any vector type in the expression
+      let vecType: string | null = null;
+
+      const trimmedArg1 = arg1.trim();
+
+      // Check if expression CONTAINS a vector constructor (anywhere, not just at start)
+      // Priority: vec4 > vec3 > vec2 to get the most likely result type
+      // For expressions like "1.- vec3<f32>(val)", the result is vec3
+      if (trimmedArg1.includes('vec4<f32>') || trimmedArg1.match(/\bvec4\s*\(/)) {
+        vecType = 'vec4';
+      } else if (trimmedArg1.includes('vec3<f32>') || trimmedArg1.match(/\bvec3\s*\(/)) {
+        vecType = 'vec3';
+      } else if (trimmedArg1.includes('vec2<f32>') || trimmedArg1.match(/\bvec2\s*\(/)) {
+        vecType = 'vec2';
+      } else if (/^[a-zA-Z_]\w*$/.test(trimmedArg1)) {
+        // It's a simple variable name - check if we know its type
+        const knownType = varTypes.get(trimmedArg1);
+        if (knownType) {
+          vecType = knownType;
+        }
+      }
+
+      // Fallback: Check if the first token is a function call or expression with arithmetic
+      /*
+      // Removed: This is too aggressive and breaks scalar clamping (e.g. clamp(x * 2.0, 0.0, 1.0))
+      if (!vecType) {
+        const startsWithFunctionCall = /^[a-zA-Z_]\w*\s*\(/.test(trimmedArg1);
+        const hasArithmetic = /[*+\-\/]/.test(trimmedArg1);
+
+        if ((startsWithFunctionCall || hasArithmetic) && looksLikeScalar(arg2) && looksLikeScalar(arg3)) {
+          // Assume vec4 for function calls and expressions (most common for colors)
+          vecType = 'vec4';
+        }
+      }
+      */
+
+      if (vecType && looksLikeScalar(arg2) && looksLikeScalar(arg3)) {
+        // Need to wrap scalars in vector constructors
+        const wgslVecType = `${vecType}<f32>`;
+        const newClamp = `clamp(${arg1}, ${wgslVecType}(${arg2}), ${wgslVecType}(${arg3}))`;
+        result = result.slice(0, clampStart) + newClamp + result.slice(parsed.endIndex + 1);
+      } else {
+        // Mark as processed
+        result = result.slice(0, clampStart) + '__CLAMP_PROCESSED__' + result.slice(clampStart + 5);
+      }
+    }
+
+    // Restore clamp keywords
+    result = result.replace(/__CLAMP_PROCESSED__/g, 'clamp');
+
+    return result;
+  }
+
+  /**
+   * Fix smoothstep() calls where edge0/edge1 are scalars but x is a vector.
+   * GLSL allows: smoothstep(0.0, 1.0, vec3) returning vec3
+   * WGSL requires: smoothstep(vec3, vec3, vec3) - all same type
+   */
+  private fixSmoothstepCalls(code: string): string {
+    // First, collect variable types so we can detect vector types from simple variable names
+    const varTypes = new Map<string, string>();
+    const varDeclPattern = /var\s+(\w+)\s*:\s*(vec[234](?:<f32>)?)/g;
+    let match;
+    while ((match = varDeclPattern.exec(code)) !== null) {
+      const varName = match[1];
+      let varType = match[2];
+      // Normalize to just vec2/vec3/vec4
+      if (varType.includes('<')) {
+        varType = varType.split('<')[0];
+      }
+      varTypes.set(varName, varType);
+    }
+
+    let result = code;
+    let safety = 0;
+    const maxIterations = 1000;
+
+    while (safety < maxIterations) {
+      safety++;
+
+      // Find smoothstep( 
+      const smoothstepMatch = result.match(/\bsmoothstep\s*\(/);
+      if (!smoothstepMatch || smoothstepMatch.index === undefined) break;
+
+      const smoothstepStart = smoothstepMatch.index;
+
+      // Parse the arguments
+      const parsed = this.parseParenInvocationArgs(result, smoothstepStart + 'smoothstep'.length);
+      if (!parsed || parsed.args.length !== 3) {
+        // Can't parse or wrong number of args, skip
+        result = result.slice(0, smoothstepStart) + '__SMOOTHSTEP_PROCESSED__' + result.slice(smoothstepStart + 10);
+        continue;
+      }
+
+      const [arg1, arg2, arg3] = parsed.args.map(a => a.trim());
+
+      // Check if arg1 and arg2 look like scalars (numbers)
+      const looksLikeScalar = (s: string) => {
+        const trimmed = s.trim();
+        // Is it a number? Match: 0, 0.0, .5, 0., 1.0f, -0.5, etc.
+        if (/^-?\d*\.?\d*f?$/.test(trimmed) && /\d/.test(trimmed)) return true;
+        return false;
+      };
+
+      // Detect vector type from third argument (x in smoothstep(edge0, edge1, x))
+      let vecType: string | null = null;
+      const trimmedArg3 = arg3.trim();
+
+      // Check if expression CONTAINS a vector constructor
+      if (trimmedArg3.includes('vec4<f32>') || trimmedArg3.match(/\bvec4\s*\(/)) {
+        vecType = 'vec4';
+      } else if (trimmedArg3.includes('vec3<f32>') || trimmedArg3.match(/\bvec3\s*\(/)) {
+        vecType = 'vec3';
+      } else if (trimmedArg3.includes('vec2<f32>') || trimmedArg3.match(/\bvec2\s*\(/)) {
+        vecType = 'vec2';
+      } else if (/^[a-zA-Z_]\w*$/.test(trimmedArg3)) {
+        // It's a simple variable name - check if we know its type
+        const knownType = varTypes.get(trimmedArg3);
+        if (knownType) {
+          vecType = knownType;
+        }
+      }
+
+      // Fallback: Check if the third arg is a function call or expression with arithmetic
+      /*
+      // Removed: This is too aggressive and breaks scalar smoothstep expressions
+      if (!vecType) {
+        const startsWithFunctionCall = /^[a-zA-Z_]\w*\s*\(/.test(trimmedArg3);
+        const hasArithmetic = /[*+\-\/]/.test(trimmedArg3);
+
+        if ((startsWithFunctionCall || hasArithmetic) && looksLikeScalar(arg1) && looksLikeScalar(arg2)) {
+          // Assume vec3 for function calls and expressions (common for color operations)
+          vecType = 'vec3';
+        }
+      }
+      */
+
+      if (vecType && looksLikeScalar(arg1) && looksLikeScalar(arg2)) {
+        // Need to wrap scalars in vector constructors
+        const wgslVecType = `${vecType}<f32>`;
+        const newSmoothstep = `smoothstep(${wgslVecType}(${arg1}), ${wgslVecType}(${arg2}), ${arg3})`;
+        result = result.slice(0, smoothstepStart) + newSmoothstep + result.slice(parsed.endIndex + 1);
+      } else {
+        // Mark as processed
+        result = result.slice(0, smoothstepStart) + '__SMOOTHSTEP_PROCESSED__' + result.slice(smoothstepStart + 10);
+      }
+    }
+
+    // Restore smoothstep keywords
+    result = result.replace(/__SMOOTHSTEP_PROCESSED__/g, 'smoothstep');
+
+    return result;
+  }
+
+  /**
+   * Fix C-style array declarations.
+   * Converts: Type name[Size]; -> var name: array<Type, Size>;
+   */
+  private fixArrayDeclarations(code: string): string {
+    const wgslTypes = 'f32|i32|u32|bool|vec[234]<f32>|mat\\d+x\\d+<f32>';
+
+    // Match: Type name[Size];
+    // We already converted basic types to WGSL types in converting definitions
+    const pattern = new RegExp(
+      `\\b(${wgslTypes})\\s+(\\w+)\\s*\\[(\\d+)\\]\\s*;`,
+      'g'
+    );
+
+    return code.replace(pattern, (match, type, name, size) => {
+      return `var ${name}: array<${type}, ${size}>;`;
+    });
+  }
+
+  /**
+   * Fix module-scope var declarations by adding <private> address space.
+   * WGSL requires: var<private> name: type = value;
+   * for module-scope mutable variables (not texture/sampler).
+   * Function-scope vars should NOT have an address space.
+   */
+  private fixModuleScopeVarDeclarations(code: string): string {
+    // Find all function definitions to determine what's module scope vs function scope
+    // Functions are: fn name(...) { ... }
+    const lines = code.split('\n');
+    const result: string[] = [];
+    let braceDepth = 0;
+    let inFunction = false;
+
+    for (const line of lines) {
+      // Check if we're entering a function
+      if (/\bfn\s+\w+\s*\(/.test(line)) {
+        inFunction = true;
+      }
+
+      // Track brace depth
+      for (const char of line) {
+        if (char === '{') braceDepth++;
+        if (char === '}') braceDepth--;
+      }
+
+      // If we're at brace depth 0 after processing, we're back at module scope
+      if (braceDepth === 0) {
+        inFunction = false;
+      }
+
+      // Only add <private> to var declarations at module scope (not inside functions)
+      if (!inFunction && braceDepth === 0) {
+        // Add <private> to module-scope var declarations
+        // Match: var name: type ...
+        // Updated to support array types and generic types
+        const fixedLine = line.replace(
+          /\bvar\s+(?!<)(\w+)\s*:\s*(f32|i32|u32|bool|vec[234]<[^>]+>|mat[234]x[234]<[^>]+>|array<[^>]+>)/g,
+          'var<private> $1: $2'
+        );
+        result.push(fixedLine);
+      } else {
+        result.push(line);
+      }
+    }
+
+    return result.join('\n');
+  }
+
+  /**
+   * Fix swizzle assignments - WGSL doesn't support assigning to swizzles like var.rgb = expr
+   * Converts: var.rgb = expr; -> var = vec4<f32>(expr, var.a);
+   * Converts: var.xyz = expr; -> var = vec4<f32>(expr, var.w);
+   */
+  private fixSwizzleAssignments(code: string): string {
+    let result = code;
+
+    // Pattern: identifier.rgb = expression;
+    // Convert to: identifier = vec4<f32>(expression, identifier.a);
+    result = result.replace(
+      /(\w+)\.rgb\s*=\s*([^;]+);/g,
+      (match, varName, expr) => {
+        return `${varName} = vec4<f32>(${expr.trim()}, ${varName}.a);`;
+      }
+    );
+
+    // Pattern: identifier.xyz = expression;
+    // Convert to: identifier = vec4<f32>(expression, identifier.w);
+    result = result.replace(
+      /(\w+)\.xyz\s*=\s*([^;]+);/g,
+      (match, varName, expr) => {
+        return `${varName} = vec4<f32>(${expr.trim()}, ${varName}.w);`;
+      }
+    );
+
+    // Pattern: identifier.xy = expression;
+    // Convert to: identifier = vec4<f32>(expression, identifier.z, identifier.w); for vec4
+    // Or: identifier = vec3<f32>(expression, identifier.z); for vec3
+    // For simplicity, assume vec4 context (most common in shaders)
+    result = result.replace(
+      /(\w+)\.xy\s*=\s*([^;]+);/g,
+      (match, varName, expr) => {
+        // Check context - if the variable looks like it's a vec2, don't modify
+        // Otherwise assume vec4 and preserve z, w
+        return `${varName} = vec4<f32>(${expr.trim()}, ${varName}.z, ${varName}.w);`;
+      }
+    );
+
+    // Pattern: identifier.rg = expression;
+    result = result.replace(
+      /(\w+)\.rg\s*=\s*([^;]+);/g,
+      (match, varName, expr) => {
+        return `${varName} = vec4<f32>(${expr.trim()}, ${varName}.b, ${varName}.a);`;
+      }
+    );
+
+    return result;
   }
 
   /**
