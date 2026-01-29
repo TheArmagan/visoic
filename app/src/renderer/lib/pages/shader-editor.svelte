@@ -139,6 +139,12 @@
     }>
   >([]);
 
+  let currentLayer = $derived(
+    layers.find(
+      (l) => l.id === currentLayerId && l.contextId === currentContextId,
+    ),
+  );
+
   // Available values from value manager
   let availableValues = $state<Array<{ id: string; name: string }>>([]);
 
@@ -874,29 +880,66 @@
   // Uniform Management
   // ==========================================
 
+  // Throttle state
+  const uniformUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const uniformLastUpdates = new Map<string, number>();
+  let saveConfigTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function debouncedSaveConfig() {
+    if (saveConfigTimer) clearTimeout(saveConfigTimer);
+    saveConfigTimer = setTimeout(() => {
+      saveConfig();
+      saveConfigTimer = null;
+    }, 1000);
+  }
+
   function updateUniform(
     contextId: string,
     layerId: string,
     name: string,
     value: number | boolean | number[],
   ) {
-    const layer = shaderManager.getLayer(contextId, layerId);
-    if (!layer) return;
+    const key = `${contextId}:${layerId}:${name}`;
+    const now = Date.now();
+    const last = uniformLastUpdates.get(key) || 0;
+    const interval = 50; // 50ms throttle
 
-    layer.setUniform(name, value);
+    const performUpdate = () => {
+      const layer = shaderManager.getLayer(contextId, layerId);
+      if (!layer) return;
 
-    // Update local state
-    const layerState = layers.find(
-      (l) => l.id === layerId && l.contextId === contextId,
-    );
-    if (layerState) {
-      const uniform = layerState.uniforms.find((u) => u.name === name);
-      if (uniform) {
-        uniform.value = value;
+      layer.setUniform(name, value);
+
+      // Update local state
+      const layerState = layers.find(
+        (l) => l.id === layerId && l.contextId === contextId,
+      );
+      if (layerState) {
+        const uniform = layerState.uniforms.find((u) => u.name === name);
+        if (uniform) {
+          uniform.value = value;
+        }
       }
-    }
 
-    saveConfig();
+      debouncedSaveConfig();
+
+      uniformLastUpdates.set(key, Date.now());
+      uniformUpdateTimers.delete(key);
+    };
+
+    if (now - last > interval) {
+      if (uniformUpdateTimers.has(key)) {
+        clearTimeout(uniformUpdateTimers.get(key)!);
+        uniformUpdateTimers.delete(key);
+      }
+      performUpdate();
+    } else {
+      if (uniformUpdateTimers.has(key)) {
+        clearTimeout(uniformUpdateTimers.get(key)!);
+      }
+      const timeout = setTimeout(performUpdate, interval - (now - last));
+      uniformUpdateTimers.set(key, timeout);
+    }
   }
 
   function updateColorChannel(
@@ -906,34 +949,58 @@
     channel: number,
     value: number,
   ) {
-    const layer = shaderManager.getLayer(contextId, layerId);
-    if (!layer) return;
+    const key = `${contextId}:${layerId}:${name}`;
+    const now = Date.now();
+    const last = uniformLastUpdates.get(key) || 0;
+    const interval = 50; // 50ms throttle
 
-    const currentValue = layer.getUniform(name);
-    const currentArray = toNumberArray(currentValue);
-    if (!currentArray) return;
+    const performUpdate = () => {
+      const layer = shaderManager.getLayer(contextId, layerId);
+      if (!layer) return;
 
-    // Ensure we have at least 4 channels for color/vec4 editing.
-    const newValue = padNumberArray(currentArray, 4, 0);
-    if (newValue.length >= 4) {
-      // alpha defaults to 1 if missing
-      if (currentArray.length < 4) newValue[3] = 1;
-    }
-    newValue[channel] = value;
-    layer.setUniform(name, newValue);
+      const currentValue = layer.getUniform(name);
+      const currentArray = toNumberArray(currentValue);
+      if (!currentArray) return;
 
-    // Update local state
-    const layerState = layers.find(
-      (l) => l.id === layerId && l.contextId === contextId,
-    );
-    if (layerState) {
-      const uniform = layerState.uniforms.find((u) => u.name === name);
-      if (uniform && Array.isArray(uniform.value)) {
-        uniform.value = newValue;
+      // Ensure we have at least 4 channels for color/vec4 editing.
+      const newValue = padNumberArray(currentArray, 4, 0);
+      if (newValue.length >= 4) {
+        // alpha defaults to 1 if missing
+        if (currentArray.length < 4) newValue[3] = 1;
       }
-    }
+      newValue[channel] = value;
+      layer.setUniform(name, newValue);
 
-    saveConfig();
+      // Update local state
+      const layerState = layers.find(
+        (l) => l.id === layerId && l.contextId === contextId,
+      );
+      if (layerState) {
+        const uniform = layerState.uniforms.find((u) => u.name === name);
+        if (uniform && Array.isArray(uniform.value)) {
+          uniform.value = newValue;
+        }
+      }
+
+      debouncedSaveConfig();
+
+      uniformLastUpdates.set(key, Date.now());
+      uniformUpdateTimers.delete(key);
+    };
+
+    if (now - last > interval) {
+      if (uniformUpdateTimers.has(key)) {
+        clearTimeout(uniformUpdateTimers.get(key)!);
+        uniformUpdateTimers.delete(key);
+      }
+      performUpdate();
+    } else {
+      if (uniformUpdateTimers.has(key)) {
+        clearTimeout(uniformUpdateTimers.get(key)!);
+      }
+      const timeout = setTimeout(performUpdate, interval - (now - last));
+      uniformUpdateTimers.set(key, timeout);
+    }
   }
 
   // ==========================================
@@ -1155,11 +1222,20 @@
 
   function startSyncLoop() {
     if (syncInterval) return;
+    let frames = 0;
     syncInterval = setInterval(() => {
+      // Also refresh stats periodically (throttled to ~10fps)
+      frames++;
+
+      const shouldUpdateUI = frames % 3 === 0;
+
       // Use untrack to prevent reactive tracking inside interval
-      syncBindingsUntracked();
-      // Also refresh stats periodically
-      refreshStatsUntracked();
+      syncBindingsUntracked(shouldUpdateUI);
+
+      if (frames >= 6) {
+        refreshStatsUntracked();
+        frames = 0;
+      }
     }, 16); // ~60fps
   }
 
@@ -1197,7 +1273,7 @@
     });
   }
 
-  function syncBindingsUntracked() {
+  function syncBindingsUntracked(updateUI: boolean = true) {
     // Use untrack to prevent reactive tracking inside interval
     untrack(() => {
       for (const layerState of layers) {
@@ -1206,6 +1282,11 @@
           layerState.id,
         );
         if (!layer) continue;
+
+        const isVisible =
+          updateUI &&
+          layerState.id === currentLayerId &&
+          layerState.contextId === currentContextId;
 
         for (const uniform of layerState.uniforms) {
           // Handle regular number binding
@@ -1221,7 +1302,7 @@
               );
               layer.setUniform(uniform.name, mapped);
               // Update UI state to reflect live value
-              uniform.value = mapped;
+              if (isVisible) uniform.value = mapped;
             }
           }
 
@@ -1257,7 +1338,7 @@
 
             if (changed) {
               layer.setUniform(uniform.name, newValue);
-              uniform.value = newValue;
+              if (isVisible) uniform.value = newValue;
             }
           }
 
@@ -1290,7 +1371,7 @@
 
             if (changed) {
               layer.setUniform(uniform.name, newValue);
-              uniform.value = newValue;
+              if (isVisible) uniform.value = newValue;
             }
           }
 
@@ -1336,7 +1417,7 @@
 
             if (changed) {
               layer.setUniform(uniform.name, newValue);
-              uniform.value = newValue;
+              if (isVisible) uniform.value = newValue;
             }
           }
         }
@@ -2077,488 +2158,477 @@ ${lastShaderError.shaderCode}`;
           Uniforms
         </h3>
 
-        {#if currentLayerId}
-          {@const currentLayer = layers.find(
-            (l) => l.id === currentLayerId && l.contextId === currentContextId,
-          )}
-          {#if currentLayer}
-            <div class="flex-1 overflow-y-auto flex flex-col gap-3">
-              {#each currentLayer.uniforms as uniform}
-                <div class="border rounded p-2 flex flex-col gap-2">
-                  <div class="flex items-center justify-between">
-                    <Label class="text-sm font-medium"
-                      >{uniform.label || uniform.name}</Label
-                    >
-                    <span class="text-xs text-muted-foreground"
-                      >{uniform.type}</span
-                    >
-                  </div>
+        {#if currentLayer}
+          <div class="flex-1 overflow-y-auto flex flex-col gap-3">
+            {#each currentLayer.uniforms as uniform (uniform.name)}
+              <div class="border rounded p-2 flex flex-col gap-2">
+                <div class="flex items-center justify-between">
+                  <Label class="text-sm font-medium"
+                    >{uniform.label || uniform.name}</Label
+                  >
+                  <span class="text-xs text-muted-foreground"
+                    >{uniform.type}</span
+                  >
+                </div>
 
-                  {#if uniform.type === "long" && uniform.labels && uniform.values}
-                    <!-- Long with LABELS/VALUES -> Dropdown -->
-                    <div class="flex items-center gap-2">
-                      <select
-                        class="flex-1 h-9 px-3 py-1 text-sm rounded-md border border-input bg-background"
-                        value={uniform.value}
-                        onchange={(e) =>
-                          updateUniform(
-                            currentLayer.contextId,
-                            currentLayer.id,
-                            uniform.name,
-                            Number((e.target as HTMLSelectElement).value),
-                          )}
-                        disabled={!!uniform.binding?.valueId}
-                      >
-                        {#each uniform.labels as label, i}
-                          <option value={uniform.values[i]}>{label}</option>
-                        {/each}
-                      </select>
+                {#if uniform.type === "long" && uniform.labels && uniform.values}
+                  <!-- Long with LABELS/VALUES -> Dropdown -->
+                  <div class="flex items-center gap-2">
+                    <select
+                      class="flex-1 h-9 px-3 py-1 text-sm rounded-md border border-input bg-background"
+                      value={uniform.value}
+                      onchange={(e) =>
+                        updateUniform(
+                          currentLayer.contextId,
+                          currentLayer.id,
+                          uniform.name,
+                          Number((e.target as HTMLSelectElement).value),
+                        )}
+                      disabled={!!uniform.binding?.valueId}
+                    >
+                      {#each uniform.labels as label, i}
+                        <option value={uniform.values[i]}>{label}</option>
+                      {/each}
+                    </select>
+                    <button
+                      onclick={() =>
+                        openBindingDialog(
+                          currentLayer.contextId,
+                          currentLayer.id,
+                          uniform.name,
+                          uniform.type,
+                        )}
+                      class="p-1 hover:bg-muted rounded"
+                      title={uniform.binding?.valueId
+                        ? "Edit binding"
+                        : "Add binding"}
+                    >
+                      {#if uniform.binding?.valueId}
+                        <Link class="w-4 h-4 text-primary" />
+                      {:else}
+                        <Unlink class="w-4 h-4 text-muted-foreground" />
+                      {/if}
+                    </button>
+                  </div>
+                  {#if uniform.binding?.valueId}
+                    <div
+                      class="text-xs text-muted-foreground flex items-center gap-1"
+                    >
+                      <Link class="w-3 h-3" />
+                      {uniform.binding.valueId}
                       <button
                         onclick={() =>
-                          openBindingDialog(
+                          removeBinding(
                             currentLayer.contextId,
                             currentLayer.id,
                             uniform.name,
-                            uniform.type,
                           )}
-                        class="p-1 hover:bg-muted rounded"
-                        title={uniform.binding?.valueId
-                          ? "Edit binding"
-                          : "Add binding"}
+                        class="ml-auto text-destructive"
                       >
-                        {#if uniform.binding?.valueId}
-                          <Link class="w-4 h-4 text-primary" />
-                        {:else}
-                          <Unlink class="w-4 h-4 text-muted-foreground" />
-                        {/if}
+                        <Trash2 class="w-3 h-3" />
                       </button>
                     </div>
-                    {#if uniform.binding?.valueId}
-                      <div
-                        class="text-xs text-muted-foreground flex items-center gap-1"
-                      >
-                        <Link class="w-3 h-3" />
-                        {uniform.binding.valueId}
-                        <button
-                          onclick={() =>
-                            removeBinding(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                            )}
-                          class="ml-auto text-destructive"
-                        >
-                          <Trash2 class="w-3 h-3" />
-                        </button>
-                      </div>
-                    {/if}
-                  {:else if uniform.type === "float" || uniform.type === "int" || uniform.type === "long"}
-                    <div class="flex items-center gap-2">
-                      <Slider
-                        type="single"
-                        value={uniform.value as number}
-                        min={getNumericBound(uniform.min, 0, 0)}
-                        max={getNumericBound(
-                          uniform.max,
-                          0,
-                          uniform.type === "long" ? 100 : 1,
-                        )}
-                        step={uniform.type === "int" || uniform.type === "long"
-                          ? 1
-                          : 0.01}
-                        onValueChange={(v) =>
-                          updateUniform(
-                            currentLayer.contextId,
-                            currentLayer.id,
-                            uniform.name,
-                            v,
-                          )}
-                        class="flex-1"
-                        disabled={!!uniform.binding?.valueId}
-                      />
-                      <span class="text-xs w-12 text-right">
-                        {(uniform.value as number).toFixed(
-                          uniform.type === "int" || uniform.type === "long"
-                            ? 0
-                            : 2,
-                        )}
-                      </span>
-                      <button
-                        onclick={() =>
-                          openBindingDialog(
-                            currentLayer.contextId,
-                            currentLayer.id,
-                            uniform.name,
-                            uniform.type,
-                          )}
-                        class="p-1 hover:bg-muted rounded"
-                        title={uniform.binding?.valueId
-                          ? "Edit binding"
-                          : "Add binding"}
-                      >
-                        {#if uniform.binding?.valueId}
-                          <Link class="w-4 h-4 text-primary" />
-                        {:else}
-                          <Unlink class="w-4 h-4 text-muted-foreground" />
-                        {/if}
-                      </button>
-                    </div>
-                    {#if uniform.binding?.valueId}
-                      <div
-                        class="text-xs text-muted-foreground flex items-center gap-1"
-                      >
-                        <Link class="w-3 h-3" />
-                        {uniform.binding.valueId}
-                        <button
-                          onclick={() =>
-                            removeBinding(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                            )}
-                          class="ml-auto text-destructive"
-                        >
-                          <Trash2 class="w-3 h-3" />
-                        </button>
-                      </div>
-                    {/if}
-                  {:else if uniform.type === "bool"}
-                    <Switch
-                      checked={uniform.value as boolean}
-                      onCheckedChange={(v) =>
+                  {/if}
+                {:else if uniform.type === "float" || uniform.type === "int" || uniform.type === "long"}
+                  <div class="flex items-center gap-2">
+                    <Slider
+                      type="single"
+                      value={uniform.value as number}
+                      min={getNumericBound(uniform.min, 0, 0)}
+                      max={getNumericBound(
+                        uniform.max,
+                        0,
+                        uniform.type === "long" ? 100 : 1,
+                      )}
+                      step={uniform.type === "int" || uniform.type === "long"
+                        ? 1
+                        : 0.01}
+                      onValueChange={(v) =>
                         updateUniform(
                           currentLayer.contextId,
                           currentLayer.id,
                           uniform.name,
                           v,
                         )}
+                      class="flex-1"
+                      disabled={!!uniform.binding?.valueId}
                     />
-                  {:else if uniform.type === "color" || uniform.type === "vec4"}
-                    {@const colorValue = uniform.value as number[]}
-                    <div class="flex flex-col gap-2">
-                      <!-- Color preview -->
-                      <div
-                        class="h-8 rounded border"
-                        style="background-color: rgba({colorValue[0] *
-                          255}, {colorValue[1] * 255}, {colorValue[2] *
-                          255}, {colorValue[3]})"
-                      ></div>
-
-                      <!-- R channel -->
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4 text-red-500">R</span>
-                        <Slider
-                          type="single"
-                          value={colorValue[0]}
-                          min={0}
-                          max={1}
-                          step={0.01}
-                          onValueChange={(v) =>
-                            updateColorChannel(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              0,
-                              v,
-                            )}
-                          class="flex-1"
-                          disabled={!!uniform.colorBinding?.r?.valueId}
-                        />
-                        <span class="text-xs w-8"
-                          >{colorValue[0].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "r",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.colorBinding?.r?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-
-                      <!-- G channel -->
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4 text-green-500">G</span>
-                        <Slider
-                          type="single"
-                          value={colorValue[1]}
-                          min={0}
-                          max={1}
-                          step={0.01}
-                          onValueChange={(v) =>
-                            updateColorChannel(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              1,
-                              v,
-                            )}
-                          class="flex-1"
-                          disabled={!!uniform.colorBinding?.g?.valueId}
-                        />
-                        <span class="text-xs w-8"
-                          >{colorValue[1].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "g",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.colorBinding?.g?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-
-                      <!-- B channel -->
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4 text-blue-500">B</span>
-                        <Slider
-                          type="single"
-                          value={colorValue[2]}
-                          min={0}
-                          max={1}
-                          step={0.01}
-                          onValueChange={(v) =>
-                            updateColorChannel(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              2,
-                              v,
-                            )}
-                          class="flex-1"
-                          disabled={!!uniform.colorBinding?.b?.valueId}
-                        />
-                        <span class="text-xs w-8"
-                          >{colorValue[2].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "b",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.colorBinding?.b?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-
-                      <!-- A channel -->
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4 text-gray-500">A</span>
-                        <Slider
-                          type="single"
-                          value={colorValue[3]}
-                          min={0}
-                          max={1}
-                          step={0.01}
-                          onValueChange={(v) =>
-                            updateColorChannel(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              3,
-                              v,
-                            )}
-                          class="flex-1"
-                          disabled={!!uniform.colorBinding?.a?.valueId}
-                        />
-                        <span class="text-xs w-8"
-                          >{colorValue[3].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "a",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.colorBinding?.a?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-                    </div>
-                  {:else if uniform.type === "vec2" || uniform.type === "point2D"}
-                    {@const vec2Value = uniform.value as number[]}
-                    <div class="flex flex-col gap-2">
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4">X</span>
-                        <Slider
-                          type="single"
-                          value={vec2Value[0]}
-                          min={getNumericBound(uniform.min, 0, 0)}
-                          max={getNumericBound(uniform.max, 0, 1)}
-                          step={0.01}
-                          onValueChange={(v) => {
-                            const newVal = [...vec2Value];
-                            newVal[0] = v;
-                            updateUniform(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              newVal,
-                            );
-                          }}
-                          class="flex-1"
-                          disabled={!!uniform.vec2Binding?.x?.valueId}
-                        />
-                        <span class="text-xs w-10"
-                          >{vec2Value[0].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "x",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.vec2Binding?.x?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-                      <div class="flex items-center gap-2">
-                        <span class="text-xs w-4">Y</span>
-                        <Slider
-                          type="single"
-                          value={vec2Value[1]}
-                          min={getNumericBound(uniform.min, 1, 0)}
-                          max={getNumericBound(uniform.max, 1, 1)}
-                          step={0.01}
-                          onValueChange={(v) => {
-                            const newVal = [...vec2Value];
-                            newVal[1] = v;
-                            updateUniform(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              newVal,
-                            );
-                          }}
-                          class="flex-1"
-                          disabled={!!uniform.vec2Binding?.y?.valueId}
-                        />
-                        <span class="text-xs w-10"
-                          >{vec2Value[1].toFixed(2)}</span
-                        >
-                        <button
-                          onclick={() =>
-                            openBindingDialog(
-                              currentLayer.contextId,
-                              currentLayer.id,
-                              uniform.name,
-                              uniform.type,
-                              "y",
-                            )}
-                          class="p-1 hover:bg-muted rounded"
-                        >
-                          {#if uniform.vec2Binding?.y?.valueId}
-                            <Link class="w-3 h-3 text-primary" />
-                          {:else}
-                            <Unlink class="w-3 h-3 text-muted-foreground" />
-                          {/if}
-                        </button>
-                      </div>
-                    </div>
-                  {:else if uniform.type === "vec3"}
-                    {@const vec3Value = uniform.value as number[]}
-                    {@const vec3Channels = ["x", "y", "z"] as const}
-                    <div class="flex flex-col gap-2">
-                      {#each ["X", "Y", "Z"] as label, i}
-                        {@const channel = vec3Channels[i]}
-                        <div class="flex items-center gap-2">
-                          <span class="text-xs w-4">{label}</span>
-                          <Slider
-                            type="single"
-                            value={vec3Value[i]}
-                            min={getNumericBound(uniform.min, i, 0)}
-                            max={getNumericBound(uniform.max, i, 1)}
-                            step={0.01}
-                            onValueChange={(v) => {
-                              const newVal = [...vec3Value];
-                              newVal[i] = v;
-                              updateUniform(
-                                currentLayer.contextId,
-                                currentLayer.id,
-                                uniform.name,
-                                newVal,
-                              );
-                            }}
-                            class="flex-1"
-                            disabled={!!uniform.vec3Binding?.[channel]?.valueId}
-                          />
-                          <span class="text-xs w-10"
-                            >{vec3Value[i].toFixed(2)}</span
-                          >
-                          <button
-                            onclick={() =>
-                              openBindingDialog(
-                                currentLayer.contextId,
-                                currentLayer.id,
-                                uniform.name,
-                                uniform.type,
-                                channel,
-                              )}
-                            class="p-1 hover:bg-muted rounded"
-                          >
-                            {#if uniform.vec3Binding?.[channel]?.valueId}
-                              <Link class="w-3 h-3 text-primary" />
-                            {:else}
-                              <Unlink class="w-3 h-3 text-muted-foreground" />
-                            {/if}
-                          </button>
-                        </div>
-                      {/each}
-                    </div>
-                  {:else}
-                    <span class="text-xs text-muted-foreground"
-                      >{formatValue(uniform.value)}</span
+                    <span class="text-xs w-12 text-right">
+                      {(uniform.value as number).toFixed(
+                        uniform.type === "int" || uniform.type === "long"
+                          ? 0
+                          : 2,
+                      )}
+                    </span>
+                    <button
+                      onclick={() =>
+                        openBindingDialog(
+                          currentLayer.contextId,
+                          currentLayer.id,
+                          uniform.name,
+                          uniform.type,
+                        )}
+                      class="p-1 hover:bg-muted rounded"
+                      title={uniform.binding?.valueId
+                        ? "Edit binding"
+                        : "Add binding"}
                     >
+                      {#if uniform.binding?.valueId}
+                        <Link class="w-4 h-4 text-primary" />
+                      {:else}
+                        <Unlink class="w-4 h-4 text-muted-foreground" />
+                      {/if}
+                    </button>
+                  </div>
+                  {#if uniform.binding?.valueId}
+                    <div
+                      class="text-xs text-muted-foreground flex items-center gap-1"
+                    >
+                      <Link class="w-3 h-3" />
+                      {uniform.binding.valueId}
+                      <button
+                        onclick={() =>
+                          removeBinding(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                          )}
+                        class="ml-auto text-destructive"
+                      >
+                        <Trash2 class="w-3 h-3" />
+                      </button>
+                    </div>
                   {/if}
-                </div>
-              {/each}
-            </div>
-          {/if}
+                {:else if uniform.type === "bool"}
+                  <Switch
+                    checked={uniform.value as boolean}
+                    onCheckedChange={(v) =>
+                      updateUniform(
+                        currentLayer.contextId,
+                        currentLayer.id,
+                        uniform.name,
+                        v,
+                      )}
+                  />
+                {:else if uniform.type === "color" || uniform.type === "vec4"}
+                  {@const colorValue = uniform.value as number[]}
+                  <div class="flex flex-col gap-2">
+                    <!-- Color preview -->
+                    <div
+                      class="h-8 rounded border"
+                      style="background-color: rgba({colorValue[0] *
+                        255}, {colorValue[1] * 255}, {colorValue[2] *
+                        255}, {colorValue[3]})"
+                    ></div>
+
+                    <!-- R channel -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4 text-red-500">R</span>
+                      <Slider
+                        type="single"
+                        value={colorValue[0]}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        onValueChange={(v) =>
+                          updateColorChannel(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            0,
+                            v,
+                          )}
+                        class="flex-1"
+                        disabled={!!uniform.colorBinding?.r?.valueId}
+                      />
+                      <span class="text-xs w-8">{colorValue[0].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "r",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.colorBinding?.r?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+
+                    <!-- G channel -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4 text-green-500">G</span>
+                      <Slider
+                        type="single"
+                        value={colorValue[1]}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        onValueChange={(v) =>
+                          updateColorChannel(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            1,
+                            v,
+                          )}
+                        class="flex-1"
+                        disabled={!!uniform.colorBinding?.g?.valueId}
+                      />
+                      <span class="text-xs w-8">{colorValue[1].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "g",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.colorBinding?.g?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+
+                    <!-- B channel -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4 text-blue-500">B</span>
+                      <Slider
+                        type="single"
+                        value={colorValue[2]}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        onValueChange={(v) =>
+                          updateColorChannel(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            2,
+                            v,
+                          )}
+                        class="flex-1"
+                        disabled={!!uniform.colorBinding?.b?.valueId}
+                      />
+                      <span class="text-xs w-8">{colorValue[2].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "b",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.colorBinding?.b?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+
+                    <!-- A channel -->
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4 text-gray-500">A</span>
+                      <Slider
+                        type="single"
+                        value={colorValue[3]}
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        onValueChange={(v) =>
+                          updateColorChannel(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            3,
+                            v,
+                          )}
+                        class="flex-1"
+                        disabled={!!uniform.colorBinding?.a?.valueId}
+                      />
+                      <span class="text-xs w-8">{colorValue[3].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "a",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.colorBinding?.a?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+                  </div>
+                {:else if uniform.type === "vec2" || uniform.type === "point2D"}
+                  {@const vec2Value = uniform.value as number[]}
+                  <div class="flex flex-col gap-2">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4">X</span>
+                      <Slider
+                        type="single"
+                        value={vec2Value[0]}
+                        min={getNumericBound(uniform.min, 0, 0)}
+                        max={getNumericBound(uniform.max, 0, 1)}
+                        step={0.01}
+                        onValueChange={(v) => {
+                          const newVal = [...vec2Value];
+                          newVal[0] = v;
+                          updateUniform(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            newVal,
+                          );
+                        }}
+                        class="flex-1"
+                        disabled={!!uniform.vec2Binding?.x?.valueId}
+                      />
+                      <span class="text-xs w-10">{vec2Value[0].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "x",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.vec2Binding?.x?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs w-4">Y</span>
+                      <Slider
+                        type="single"
+                        value={vec2Value[1]}
+                        min={getNumericBound(uniform.min, 1, 0)}
+                        max={getNumericBound(uniform.max, 1, 1)}
+                        step={0.01}
+                        onValueChange={(v) => {
+                          const newVal = [...vec2Value];
+                          newVal[1] = v;
+                          updateUniform(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            newVal,
+                          );
+                        }}
+                        class="flex-1"
+                        disabled={!!uniform.vec2Binding?.y?.valueId}
+                      />
+                      <span class="text-xs w-10">{vec2Value[1].toFixed(2)}</span
+                      >
+                      <button
+                        onclick={() =>
+                          openBindingDialog(
+                            currentLayer.contextId,
+                            currentLayer.id,
+                            uniform.name,
+                            uniform.type,
+                            "y",
+                          )}
+                        class="p-1 hover:bg-muted rounded"
+                      >
+                        {#if uniform.vec2Binding?.y?.valueId}
+                          <Link class="w-3 h-3 text-primary" />
+                        {:else}
+                          <Unlink class="w-3 h-3 text-muted-foreground" />
+                        {/if}
+                      </button>
+                    </div>
+                  </div>
+                {:else if uniform.type === "vec3"}
+                  {@const vec3Value = uniform.value as number[]}
+                  {@const vec3Channels = ["x", "y", "z"] as const}
+                  <div class="flex flex-col gap-2">
+                    {#each ["X", "Y", "Z"] as label, i}
+                      {@const channel = vec3Channels[i]}
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs w-4">{label}</span>
+                        <Slider
+                          type="single"
+                          value={vec3Value[i]}
+                          min={getNumericBound(uniform.min, i, 0)}
+                          max={getNumericBound(uniform.max, i, 1)}
+                          step={0.01}
+                          onValueChange={(v) => {
+                            const newVal = [...vec3Value];
+                            newVal[i] = v;
+                            updateUniform(
+                              currentLayer.contextId,
+                              currentLayer.id,
+                              uniform.name,
+                              newVal,
+                            );
+                          }}
+                          class="flex-1"
+                          disabled={!!uniform.vec3Binding?.[channel]?.valueId}
+                        />
+                        <span class="text-xs w-10"
+                          >{vec3Value[i].toFixed(2)}</span
+                        >
+                        <button
+                          onclick={() =>
+                            openBindingDialog(
+                              currentLayer.contextId,
+                              currentLayer.id,
+                              uniform.name,
+                              uniform.type,
+                              channel,
+                            )}
+                          class="p-1 hover:bg-muted rounded"
+                        >
+                          {#if uniform.vec3Binding?.[channel]?.valueId}
+                            <Link class="w-3 h-3 text-primary" />
+                          {:else}
+                            <Unlink class="w-3 h-3 text-muted-foreground" />
+                          {/if}
+                        </button>
+                      </div>
+                    {/each}
+                  </div>
+                {:else}
+                  <span class="text-xs text-muted-foreground"
+                    >{formatValue(uniform.value)}</span
+                  >
+                {/if}
+              </div>
+            {/each}
+          </div>
         {:else}
           <p class="text-sm text-muted-foreground text-center py-4">
             Select a layer to edit its uniforms

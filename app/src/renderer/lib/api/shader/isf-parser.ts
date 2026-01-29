@@ -299,6 +299,87 @@ export class ISFParser {
     return null;
   }
 
+  private replaceCall(code: string, name: string, replacer: (args: string[]) => string | null): string {
+    let out = code;
+    let startFrom = 0;
+    let safety = 0;
+
+    while (safety < 10000) {
+      const found = this.findMacroInvocation(out, name, startFrom);
+      if (!found) break;
+
+      safety++;
+      const parsed = this.parseParenInvocationArgs(out, found.argsStartIndex);
+      if (!parsed) {
+        startFrom = found.argsStartIndex + 1;
+        continue;
+      }
+
+      const replacement = replacer(parsed.args);
+      if (replacement !== null) {
+        out = out.slice(0, found.startIndex) + replacement + out.slice(parsed.endIndex + 1);
+        startFrom = found.startIndex + replacement.length;
+      } else {
+        startFrom = parsed.endIndex + 1;
+      }
+    }
+    return out;
+  }
+
+  private replaceTextureSamplingCalls(code: string): string {
+    let wgsl = code;
+
+    // IMG_NORM_PIXEL(tex, coord) -> textureSampleLevel(tex, texSampler, coord, 0.0)
+    wgsl = this.replaceCall(wgsl, 'IMG_NORM_PIXEL', (args) => {
+      if (args.length !== 2) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+    });
+
+    // IMG_PIXEL(tex, coord) -> textureSampleLevel(tex, texSampler, coord / uniforms.renderSize, 0.0)
+    wgsl = this.replaceCall(wgsl, 'IMG_PIXEL', (args) => {
+      if (args.length !== 2) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, (${args[1]}) / uniforms.renderSize, 0.0)`;
+    });
+
+    // IMG_THIS_PIXEL(tex) -> textureSampleLevel(tex, texSampler, input.uv, 0.0)
+    wgsl = this.replaceCall(wgsl, 'IMG_THIS_PIXEL', (args) => {
+      if (args.length !== 1) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, input.uv, 0.0)`;
+    });
+
+    // IMG_THIS_NORM_PIXEL(tex) -> textureSampleLevel(tex, texSampler, input.uv, 0.0)
+    wgsl = this.replaceCall(wgsl, 'IMG_THIS_NORM_PIXEL', (args) => {
+      if (args.length !== 1) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, input.uv, 0.0)`;
+    });
+
+    // texture2D(tex, coord) -> textureSampleLevel(tex, texSampler, coord, 0.0)
+    wgsl = this.replaceCall(wgsl, 'texture2D', (args) => {
+      if (args.length !== 2) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+    });
+
+    // texture(tex, coord) -> textureSampleLevel(tex, texSampler, coord, 0.0)
+    wgsl = this.replaceCall(wgsl, 'texture', (args) => {
+      if (args.length !== 2) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+    });
+
+    // textureLod(tex, coord, lod) -> textureSampleLevel(tex, texSampler, coord, lod)
+    wgsl = this.replaceCall(wgsl, 'textureLod', (args) => {
+      if (args.length !== 3) return null;
+      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, ${args[2]})`;
+    });
+
+    // textureSample(tex, samp, coord) -> textureSampleLevel(tex, samp, coord, 0.0)
+    wgsl = this.replaceCall(wgsl, 'textureSample', (args) => {
+      if (args.length !== 3) return null;
+      return `textureSampleLevel(${args[0]}, ${args[1]}, ${args[2]}, 0.0)`;
+    });
+
+    return wgsl;
+  }
+
   private rewriteCallNameByArgCount(
     code: string,
     name: string,
@@ -484,9 +565,14 @@ export class ISFParser {
     uniformStruct += '  speed: f32,\n';
     uniformStruct += '  date: vec4<f32>,\n';
 
+    const reservedUniforms = new Set([
+      'time', 'timeDelta', 'renderSize', 'passIndex',
+      'frameIndex', 'layerOpacity', 'speed', 'date'
+    ]);
+
     // Add user inputs to uniform struct
     for (const input of inputs) {
-      if (input.TYPE !== 'image') {
+      if (input.TYPE !== 'image' && !reservedUniforms.has(input.NAME)) {
         const wgslType = TYPE_MAP[input.TYPE] || 'f32';
         uniformStruct += `  ${input.NAME}: ${wgslType},\n`;
       }
@@ -895,30 +981,10 @@ ${convertedMain}
     wgsl = wgsl.replace(/\+\+\s*(\w+)\b/g, '$1 = $1 + 1');
     wgsl = wgsl.replace(/--\s*(\w+)\b/g, '$1 = $1 - 1');
 
-    // Replace texture sampling
-    // Use textureSampleLevel with LOD 0 to allow sampling in non-uniform control flow (if statements)
-    // Match texture2D(tex, uv) and replace with textureSampleLevel(tex, texSampler, uv, 0.0)
-    wgsl = wgsl.replace(/\btexture2D\s*\(\s*(\w+)\s*,\s*([^)]+)\)/g, 'textureSampleLevel($1, $1Sampler, $2, 0.0)');
-    // GLSL 3xx+ uses `texture(sampler, uv)`
-    wgsl = wgsl.replace(/\btexture\s*\(\s*(\w+)\s*,\s*([^)]+)\)/g, 'textureSampleLevel($1, $1Sampler, $2, 0.0)');
-    // `textureLod(sampler, uv, lod)` -> `textureSampleLevel(...)` - already has LOD parameter
-    wgsl = wgsl.replace(/\btextureLod\s*\(\s*(\w+)\s*,/g, 'textureSampleLevel($1, $1Sampler,');
+    // Replace texture sampling (IMG_PIXEL, texture2D, etc.)
+    // Uses textureSampleLevel with LOD 0 to allow sampling in non-uniform control flow
+    wgsl = this.replaceTextureSamplingCalls(wgsl);
 
-    // Replace ISF specific functions
-    // Use textureSampleLevel with LOD 0 to allow sampling in non-uniform control flow
-    wgsl = wgsl.replace(/\bIMG_NORM_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\)/g,
-      'textureSampleLevel($1, $1Sampler, $2, 0.0)');
-    wgsl = wgsl.replace(/\bIMG_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\)/g,
-      'textureSampleLevel($1, $1Sampler, ($2) / uniforms.renderSize, 0.0)');
-    wgsl = wgsl.replace(/\bIMG_THIS_PIXEL\s*\(\s*(\w+)\s*\)/g,
-      'textureSampleLevel($1, $1Sampler, input.uv, 0.0)');
-    wgsl = wgsl.replace(/\bIMG_THIS_NORM_PIXEL\s*\(\s*(\w+)\s*\)/g,
-      'textureSampleLevel($1, $1Sampler, input.uv, 0.0)');
-
-    // Convert any remaining textureSample calls to textureSampleLevel for non-uniform control flow safety
-    // Match textureSample(tex, sampler, uv) and add LOD 0.0 parameter
-    // Avoid matching textureSampleLevel which already has the LOD
-    wgsl = wgsl.replace(/\btextureSample\s*\(\s*(\w+)\s*,\s*(\w+)\s*,\s*([^)]+)\)/g, 'textureSampleLevel($1, $2, $3, 0.0)');
 
     // Replace built-in variables
     wgsl = wgsl.replace(/\bisf_FragNormCoord\b/g, 'input.uv');
@@ -1331,7 +1397,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Using more specific type names to avoid partial matches
     const typePattern = 'void|float|int|bool|vec2|vec3|vec4|ivec2|ivec3|ivec4|uvec2|uvec3|uvec4|mat2|mat3|mat4';
     const funcRegex = new RegExp(
-      `\\b(${typePattern})\\s+(\\w+)\\s*\\(([^)]*)\\)\\s*\\{`,
+      `\\b(${typePattern})\\s+(\\w+)\\s*\\(([^)]*)\\)(?:\\s|__COMMENT_\\d+__)*\\{`,
       'g'
     );
 
