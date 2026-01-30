@@ -51,6 +51,7 @@
     "@luma.gl/shadertools": "^9.2.6",
     "@luma.gl/webgpu": "^9.2.6",
     "@webgpu/types": "^0.1.69",
+    "@xyflow/svelte": "^1.5.0",
     "bits-ui": "^2.14.4",
     "clsx": "^2.1.1",
     "expr-eval": "^2.0.2",

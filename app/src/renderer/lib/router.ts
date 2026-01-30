@@ -11,6 +11,8 @@ import ValueBindingsPage from '$lib/pages/value-bindings.svelte';
 import ValueMonitorPage from '$lib/pages/value-monitor.svelte';
 // @ts-ignore
 import ShaderEditorPage from '$lib/pages/shader-editor.svelte';
+// @ts-ignore
+import NodeEditorPage from '$lib/pages/node-editor.svelte';
 
 export type RouterState = {
   routes: Record<string, Component>;
@@ -28,6 +30,7 @@ const initial: RouterState = {
     '/value-bindings': ValueBindingsPage,
     '/value-monitor': ValueMonitorPage,
     '/shader-editor': ShaderEditorPage,
+    '/node-editor': NodeEditorPage,
   },
   currentPage: {
     path: '/',

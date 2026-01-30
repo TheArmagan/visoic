@@ -4,6 +4,8 @@
   import RouteLink from "$lib/components/route-link.svelte";
   import { router } from "$lib/router";
   import { Toaster } from "$lib/components/ui/sonner/index.js";
+  import { onMount } from "svelte";
+  import { configManager } from "$lib/api/values";
 
   const currentPage = $derived($router.currentPage);
 
@@ -28,7 +30,15 @@
       name: "Shaders",
       to: "/shader-editor",
     },
+    {
+      name: "Nodes",
+      to: "/node-editor",
+    },
   ];
+
+  onMount(() => {
+    configManager.initialize().catch(() => {});
+  });
 </script>
 
 <Toaster />
