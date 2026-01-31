@@ -67,6 +67,6 @@
     <currentPage.component />
   </div>
   <code class="fixed bottom-0 right-0 p-2 text-xs text-white/50"
-    >v0.0.2-dev.0</code
+    >v0.0.5-dev.3</code
   >
 </main>
