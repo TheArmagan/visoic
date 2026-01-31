@@ -145,6 +145,10 @@ export interface HandleDefinition {
   max?: number;
   /** Step value for number inputs */
   step?: number;
+  /** Available values for selection (long type) */
+  values?: number[];
+  /** Labels for values (long type) */
+  labels?: string[];
 }
 
 export interface InputHandle extends HandleDefinition {

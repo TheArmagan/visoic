@@ -48,6 +48,8 @@ interface ISFInput {
   MIN?: number;
   MAX?: number;
   LABEL?: string;
+  VALUES?: number[];
+  LABELS?: string[];
 }
 
 interface ISFMetadata {
@@ -79,12 +81,24 @@ export function registerShaderNode(
     for (const input of metadata.INPUTS) {
       const dataType = isfTypeToDataType(input.TYPE);
 
+      // For long type with VALUES, compute min/max from values array
+      let minVal = input.MIN;
+      let maxVal = input.MAX;
+      if (input.TYPE.toLowerCase() === 'long' && input.VALUES && input.VALUES.length > 0) {
+        minVal = Math.min(...input.VALUES);
+        maxVal = Math.max(...input.VALUES);
+      }
+
       inputs.push({
         type: 'input',
         id: input.NAME,
         label: input.LABEL ?? input.NAME,
         dataType,
         defaultValue: input.DEFAULT ?? getDefaultForType(dataType),
+        min: minVal,
+        max: maxVal,
+        values: input.VALUES,
+        labels: input.LABELS,
       });
     }
   }
@@ -207,14 +221,24 @@ function registerISFShaderNode(
     for (const input of metadata.INPUTS) {
       const dataType = isfTypeToDataType(input.TYPE);
 
+      // For long type with VALUES, compute min/max from values array
+      let minVal = input.MIN;
+      let maxVal = input.MAX;
+      if (input.TYPE.toLowerCase() === 'long' && input.VALUES && input.VALUES.length > 0) {
+        minVal = Math.min(...input.VALUES);
+        maxVal = Math.max(...input.VALUES);
+      }
+
       inputs.push({
         type: 'input',
         id: input.NAME,
         label: input.LABEL ?? input.NAME,
         dataType,
         defaultValue: input.DEFAULT ?? getDefaultForType(dataType),
-        min: input.MIN,
-        max: input.MAX,
+        min: minVal,
+        max: maxVal,
+        values: input.VALUES,
+        labels: input.LABELS,
       });
     }
   } else {

@@ -1030,8 +1030,16 @@ ${convertedMain}
       if (input.TYPE !== 'image') {
         // Negative lookahead to avoid replacing in "var name: TYPE = name_in" pattern
         // Also avoid replacing when preceded by "var " (variable declaration of same name)
-        const regex = new RegExp(`(?<!var\\s+)\\b${input.NAME}\\b(?!_in)(?!\\()`, 'g');
-        wgsl = wgsl.replace(regex, `uniforms.${input.NAME}`);
+        // Also ensure not to replace member access (e.g., .r where r is an input name)
+        const regex = new RegExp(`(?<!var\\s+)(?<!\\.)\\b${input.NAME}\\b(?!_in)(?!\\()`, 'g');
+
+        // Ensure int/long inputs are cast to i32, as they are stored as f32 in uniforms
+        // but used as integers in GLSL logic (function args, array indices)
+        if (input.TYPE === 'int' || input.TYPE === 'long') {
+          wgsl = wgsl.replace(regex, `i32(uniforms.${input.NAME})`);
+        } else {
+          wgsl = wgsl.replace(regex, `uniforms.${input.NAME}`);
+        }
       }
     }
 
@@ -1254,33 +1262,271 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
    * Note: This is a best-effort string transform (not a full parser).
    */
   private convertTernaryToSelect(code: string): string {
+    // Use a more robust approach that handles ternary operators anywhere,
+    // including inside function arguments and nested expressions.
+    // Process iteratively until no more ternary operators remain.
+
     let out = code;
+    let maxIterations = 1000; // Safety limit to prevent infinite loops
 
-    // Assignment form: lhs = cond ? a : b;
-    out = out.replace(
-      /(\b[\w\.\[\]]+\b)\s*=\s*([^;\n\r]+?)\s*\?\s*([^;\n\r]+?)\s*:\s*([^;\n\r]+?)\s*;/g,
-      (_m, lhs, cond, a, b) => `${lhs} = select(${b}, ${a}, ${cond});`,
-    );
-
-    // Compound assignment forms: lhs += cond ? a : b; (also -=, *=, /=)
-    out = out.replace(
-      /(\b[\w\.\[\]]+\b)\s*(\+=|-=|\*=|\/=)\s*([^;\n\r]+?)\s*\?\s*([^;\n\r]+?)\s*:\s*([^;\n\r]+?)\s*;/g,
-      (_m, lhs, op, cond, a, b) => `${lhs} ${op} select(${b}, ${a}, ${cond});`,
-    );
-
-    // Return form: return cond ? a : b;
-    out = out.replace(
-      /return\s+([^;\n\r]+?)\s*\?\s*([^;\n\r]+?)\s*:\s*([^;\n\r]+?)\s*;/g,
-      (_m, cond, a, b) => `return select(${b}, ${a}, ${cond});`,
-    );
-
-    // Var init form: var x: T = cond ? a : b;
-    out = out.replace(
-      /(var\s+\w+\s*:\s*[\w<>]+\s*=\s*)([^;\n\r]+?)\s*\?\s*([^;\n\r]+?)\s*:\s*([^;\n\r]+?)\s*;/g,
-      (_m, prefix, cond, a, b) => `${prefix}select(${b}, ${a}, ${cond});`,
-    );
+    while (maxIterations-- > 0) {
+      const result = this.convertOneTernary(out);
+      if (result === out) {
+        // No more conversions possible
+        break;
+      }
+      out = result;
+    }
 
     return out;
+  }
+
+  /**
+   * Find and convert a single ternary operator to select().
+   * Returns the modified code, or the same code if no ternary was found.
+   */
+  private convertOneTernary(code: string): string {
+    // Find the first '?' that looks like a ternary operator
+    // We need to be careful not to match '?' inside strings or comments
+
+    let i = 0;
+    while (i < code.length) {
+      // Skip strings
+      if (code[i] === '"' || code[i] === "'") {
+        const quote = code[i];
+        i++;
+        while (i < code.length && code[i] !== quote) {
+          if (code[i] === '\\') i++; // Skip escaped char
+          i++;
+        }
+        i++;
+        continue;
+      }
+
+      // Skip single-line comments
+      if (code[i] === '/' && code[i + 1] === '/') {
+        while (i < code.length && code[i] !== '\n') i++;
+        continue;
+      }
+
+      // Skip multi-line comments
+      if (code[i] === '/' && code[i + 1] === '*') {
+        i += 2;
+        while (i < code.length - 1 && !(code[i] === '*' && code[i + 1] === '/')) i++;
+        i += 2;
+        continue;
+      }
+
+      // Found a '?' - check if it's a ternary operator
+      if (code[i] === '?') {
+        // Try to parse the ternary expression
+        const ternary = this.parseTernaryAt(code, i);
+        if (ternary) {
+          // Replace the ternary with select()
+          const select = `select(${ternary.falseExpr.trim()}, ${ternary.trueExpr.trim()}, ${ternary.condition.trim()})`;
+          return code.slice(0, ternary.start) + select + code.slice(ternary.end);
+        }
+      }
+
+      i++;
+    }
+
+    return code; // No ternary found
+  }
+
+  /**
+   * Parse a ternary expression starting at the '?' position.
+   * Returns the parsed parts and positions, or null if not a valid ternary.
+   */
+  private parseTernaryAt(code: string, questionPos: number): {
+    start: number;      // Start of condition
+    end: number;        // End of false expression
+    condition: string;
+    trueExpr: string;
+    falseExpr: string;
+  } | null {
+    // Find the condition (everything before '?' that forms a valid expression)
+    const condResult = this.findConditionBefore(code, questionPos);
+    if (!condResult) return null;
+
+    // Find the ':' that matches this '?'
+    const colonPos = this.findMatchingColon(code, questionPos + 1);
+    if (colonPos === -1) return null;
+
+    // Extract the true expression (between ? and :)
+    const trueExpr = code.slice(questionPos + 1, colonPos).trim();
+    if (!trueExpr) return null;
+
+    // Find the end of the false expression
+    const falseEnd = this.findExpressionEnd(code, colonPos + 1);
+    if (falseEnd === -1) return null;
+
+    const falseExpr = code.slice(colonPos + 1, falseEnd).trim();
+    if (!falseExpr) return null;
+
+    return {
+      start: condResult.start,
+      end: falseEnd,
+      condition: condResult.condition,
+      trueExpr,
+      falseExpr,
+    };
+  }
+
+  /**
+   * Find the condition expression before a '?' in a ternary.
+   * Works backward from the '?' position.
+   */
+  private findConditionBefore(code: string, questionPos: number): { start: number; condition: string } | null {
+    let i = questionPos - 1;
+
+    // Skip whitespace
+    while (i >= 0 && /\s/.test(code[i])) i--;
+    if (i < 0) return null;
+
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let start = i;
+
+    // Work backwards to find the start of the condition
+    while (i >= 0) {
+      const ch = code[i];
+
+      if (ch === ')') parenDepth++;
+      else if (ch === '(') {
+        if (parenDepth > 0) parenDepth--;
+        else break; // Opening paren not matched - this is the boundary
+      }
+      else if (ch === ']') bracketDepth++;
+      else if (ch === '[') {
+        if (bracketDepth > 0) bracketDepth--;
+        else break;
+      }
+      else if (parenDepth === 0 && bracketDepth === 0) {
+        // Stop at operators that have lower precedence than ternary
+        // or at statement boundaries
+        if (ch === ',' || ch === ';' || ch === '{' || ch === '}') {
+          break;
+        }
+        // Stop at assignment operators (= but not ==, !=, <=, >=)
+        // Check for standalone = that is an assignment, not part of == != <= >=
+        if (ch === '=') {
+          const prevCh = i > 0 ? code[i - 1] : '';
+          const nextCh = i < code.length - 1 ? code[i + 1] : '';
+          // It's an assignment if:
+          // - Previous char is not ! < > = (so not !=, <=, >=, ==)
+          // - Next char is not = (so not ==)
+          const isPartOfComparisonBefore = /[!<>=]/.test(prevCh);
+          const isPartOfComparisonAfter = nextCh === '=';
+          if (!isPartOfComparisonBefore && !isPartOfComparisonAfter) {
+            break;
+          }
+        }
+      }
+
+      start = i;
+      i--;
+    }
+
+    const condition = code.slice(start, questionPos).trim();
+    if (!condition) return null;
+
+    return { start, condition };
+  }
+
+  /**
+   * Find the ':' that matches a '?' in a ternary expression.
+   * Handles nested parentheses and nested ternaries.
+   */
+  private findMatchingColon(code: string, startPos: number): number {
+    let i = startPos;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let nestedTernary = 0;
+
+    while (i < code.length) {
+      const ch = code[i];
+
+      // Skip strings
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < code.length && code[i] !== quote) {
+          if (code[i] === '\\') i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') parenDepth--;
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') bracketDepth--;
+      else if (ch === '?' && parenDepth === 0 && bracketDepth === 0) {
+        nestedTernary++;
+      }
+      else if (ch === ':' && parenDepth === 0 && bracketDepth === 0) {
+        if (nestedTernary > 0) {
+          nestedTernary--;
+        } else {
+          return i;
+        }
+      }
+
+      i++;
+    }
+
+    return -1;
+  }
+
+  /**
+   * Find the end of an expression (the false part of a ternary).
+   * Stops at ',', ';', ')', ']', '}' at depth 0.
+   */
+  private findExpressionEnd(code: string, startPos: number): number {
+    let i = startPos;
+    let parenDepth = 0;
+    let bracketDepth = 0;
+
+    // Skip leading whitespace
+    while (i < code.length && /\s/.test(code[i])) i++;
+
+    while (i < code.length) {
+      const ch = code[i];
+
+      // Skip strings
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < code.length && code[i] !== quote) {
+          if (code[i] === '\\') i++;
+          i++;
+        }
+        i++;
+        continue;
+      }
+
+      if (ch === '(') parenDepth++;
+      else if (ch === ')') {
+        if (parenDepth > 0) parenDepth--;
+        else return i; // End of expression
+      }
+      else if (ch === '[') bracketDepth++;
+      else if (ch === ']') {
+        if (bracketDepth > 0) bracketDepth--;
+        else return i;
+      }
+      else if (parenDepth === 0 && bracketDepth === 0) {
+        if (ch === ',' || ch === ';' || ch === '}') {
+          return i;
+        }
+      }
+
+      i++;
+    }
+
+    return i; // End of code
   }
 
   /**
@@ -1990,8 +2236,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         const varUsagePattern = new RegExp(`\\b${varName}\\b(\\.[xyzwrgba]+)?`, 'g');
         let usageMatch;
         while ((usageMatch = varUsagePattern.exec(expr)) !== null) {
-          const swizzle = usageMatch[1];
           const matchStart = usageMatch.index;
+
+          // Ignore if preceded by dot (property access, not variable)
+          if (matchStart > 0 && expr[matchStart - 1] === '.') {
+            continue;
+          }
+
+          const swizzle = usageMatch[1];
 
           // Single-component swizzle is scalar.
           if (swizzle && swizzle.length === 2 && !/[xyzwrgba]{2,}/.test(swizzle)) { // .x is 2 chars
@@ -2159,7 +2411,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       // Fallback: Check if expression contains any vector variables NOT in scalar context
       if (!vecType) {
         for (const [varName, varType] of varTypes) {
-          if (trimmedArg1.includes(varName) && !isScalarByVectorUsage(trimmedArg1)) {
+          // Check for variable usage (whole word, not preceded by dot)
+          const varRegex = new RegExp(`(?<!\\.)\\b${varName}\\b`);
+          if (varRegex.test(trimmedArg1) && !isScalarByVectorUsage(trimmedArg1)) {
             vecType = varType;
             break;
           }

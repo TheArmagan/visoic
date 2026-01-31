@@ -138,7 +138,28 @@
     {#each controllableInputs as input (input.id)}
       {@const value = data.inputValues[input.id]}
 
-      {#if input.dataType === "number"}
+      {#if input.dataType === "number" && input.values && input.labels}
+        <!-- Long type with VALUES/LABELS - show as dropdown -->
+        <div>
+          <Label class="text-[10px] text-neutral-400 block mb-1">{input.label}</Label>
+          <Select.Root
+            type="single"
+            value={String((value as number) ?? (input.defaultValue as number) ?? input.values[0])}
+            onValueChange={(v) => updateInputValue(input.id, parseInt(v))}
+          >
+            <Select.Trigger
+              class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag w-full"
+            >
+              {input.labels[input.values.indexOf((value as number) ?? (input.defaultValue as number) ?? input.values[0])] ?? `Value: ${value}`}
+            </Select.Trigger>
+            <Select.Content>
+              {#each input.values as val, idx}
+                <Select.Item value={String(val)}>{input.labels[idx] ?? val}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      {:else if input.dataType === "number"}
         <div>
           <div class="flex items-center justify-between mb-1">
             <Label class="text-[10px] text-neutral-400">{input.label}</Label>
