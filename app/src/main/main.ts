@@ -452,7 +452,14 @@ function createWindow() {
         wgsl: result.wgslOutput,
       });
     }
-    broadcastToCliClients({ type: 'result', payload: result });
+    // Map wgslOutput to wgsl for CLI clients
+    broadcastToCliClients({
+      type: 'result',
+      payload: {
+        ...result,
+        wgsl: result.wgslOutput,
+      }
+    });
   });
 
   // IPC: Receive test complete from renderer

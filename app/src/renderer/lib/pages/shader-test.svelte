@@ -184,11 +184,17 @@
   }
 
   // Start test suite
-  async function startTest(testConfig?: Partial<ShaderTestConfig>) {
+  async function startTest(
+    testConfig?: Partial<ShaderTestConfig> & { includeWgsl?: boolean },
+  ) {
     if (isRunning) return;
 
     // Merge config
     if (testConfig) {
+      // Map CLI flag to config property
+      if (testConfig.includeWgsl !== undefined) {
+        testConfig.includeWgslOutput = testConfig.includeWgsl;
+      }
       config = { ...config, ...testConfig };
     }
 
