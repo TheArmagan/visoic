@@ -1,3 +1,4 @@
 shader test suite
 automatically try to convert and compile shader if error happens try a fix and then continiue to other shader until all shaders fixed
 this can be done trough a page on app and send the error info to console app using ipc then implement fix then reload the app window and try again
+write a console command for it that connects to the active app process so copilot can test out stuff its self and continiue to iterate
