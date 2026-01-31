@@ -217,18 +217,36 @@ class NodeRuntimeManager {
 
       // Get analyzer from connected audio input, fft input, or own runtime
       let analyzer: FFTAnalyzer | undefined;
+      let inputGain = 1.0; // Gain from upstream normalizer
       const audioInput = inputValues.audio;
       const fftInput = inputValues.fft;
 
-      // Try audio input first
-      if (typeof audioInput === 'string') {
-        // It's an analyzer ID
-        analyzer = audioManager.getAnalyzer(audioInput);
+      // Try audio input first - can be string (analyzer ID) or object with gain
+      if (audioInput) {
+        if (typeof audioInput === 'string') {
+          // It's an analyzer ID
+          analyzer = audioManager.getAnalyzer(audioInput);
+        } else if (typeof audioInput === 'object' && audioInput !== null) {
+          // It's an object with analyzerId and gain
+          const audioObj = audioInput as { analyzerId?: string; gain?: number };
+          if (audioObj.analyzerId) {
+            analyzer = audioManager.getAnalyzer(audioObj.analyzerId);
+            inputGain = audioObj.gain ?? 1.0;
+          }
+        }
       }
 
       // Try fft input if no audio input (for FFT Band nodes)
-      if (!analyzer && typeof fftInput === 'string') {
-        analyzer = audioManager.getAnalyzer(fftInput);
+      if (!analyzer && fftInput) {
+        if (typeof fftInput === 'string') {
+          analyzer = audioManager.getAnalyzer(fftInput);
+        } else if (typeof fftInput === 'object' && fftInput !== null) {
+          const fftObj = fftInput as { analyzerId?: string; gain?: number };
+          if (fftObj.analyzerId) {
+            analyzer = audioManager.getAnalyzer(fftObj.analyzerId);
+            inputGain = fftObj.gain ?? 1.0;
+          }
+        }
       }
 
       // If this is a device node, use its own runtime
@@ -324,19 +342,35 @@ class NodeRuntimeManager {
           const maxGain = Number(inputValues.maxGain ?? data.normalizerConfig?.maxGain ?? 3.0);
 
           const analyzerData = analyzer.getData();
-          const currentLevel = analyzerData.averageAmplitude;
+          const currentLevel = analyzerData.averageAmplitude * inputGain; // Apply upstream gain
 
           // Calculate gain to reach target level
-          let targetGain = currentLevel > 0 ? targetLevel / currentLevel : 1;
+          let targetGain = currentLevel > 0.001 ? targetLevel / currentLevel : 1;
           targetGain = Math.max(minGain, Math.min(maxGain, targetGain)); // Clamp gain with config values
 
-          // Smooth gain changes
+          // Smooth gain changes using exponential smoothing
+          // Convert attack/release time to per-frame smoothing factor (assuming ~60fps)
           const prevGain = Number(node.data.outputValues?.gain ?? 1);
-          const smoothingFactor = currentLevel > prevGain * targetLevel ? attackTime : releaseTime;
-          const newGain = prevGain + (targetGain - prevGain) * (1 - smoothingFactor);
+          const isIncreasing = targetGain > prevGain;
+          const timeConstant = isIncreasing ? attackTime : releaseTime;
+          // Smoothing factor: smaller timeConstant = faster response
+          // Factor = 1 - e^(-deltaTime/timeConstant), approximated for 60fps
+          const smoothingFactor = Math.min(1, (1 / 60) / Math.max(0.001, timeConstant));
+          const newGain = prevGain + (targetGain - prevGain) * smoothingFactor;
 
-          outputs.audio = analyzer.id; // Pass through audio reference
-          outputs.gain = Math.max(minGain, Math.min(maxGain, newGain)); // Ensure output is clamped
+          // Clamp final gain
+          const clampedGain = Math.max(minGain, Math.min(maxGain, newGain));
+
+          // Total gain = upstream gain * this normalizer's gain
+          const totalGain = inputGain * clampedGain;
+
+          // Calculate normalized output value
+          const normalizedValue = Math.min(1, analyzerData.averageAmplitude * totalGain);
+
+          // Pass audio with gain info for downstream nodes
+          outputs.audio = { analyzerId: analyzer.id, gain: totalGain };
+          outputs.gain = clampedGain;
+          outputs.value = normalizedValue; // Normalized audio level output
           break;
         }
 
@@ -345,20 +379,27 @@ class NodeRuntimeManager {
           const highFreq = Number(inputValues.highFreq ?? 250);
           const mode = (data.calculationMode || 'average') as 'average' | 'peak' | 'rms' | 'sum' | 'weighted';
 
-          outputs.value = analyzer.getFrequencyRangeAdvanced(lowFreq, highFreq, mode);
-          outputs.peak = analyzer.getFrequencyRangeAdvanced(lowFreq, highFreq, 'peak');
+          // Apply upstream gain to frequency range values
+          const rawValue = analyzer.getFrequencyRangeAdvanced(lowFreq, highFreq, mode);
+          const rawPeak = analyzer.getFrequencyRangeAdvanced(lowFreq, highFreq, 'peak');
+          outputs.value = Math.min(1, rawValue * inputGain);
+          outputs.peak = Math.min(1, rawPeak * inputGain);
+          // Pass through audio with gain for chaining
+          outputs.audio = inputGain !== 1.0 ? { analyzerId: analyzer.id, gain: inputGain } : analyzer.id;
           break;
         }
 
         case 'amplitude': {
           const analyzerData = analyzer.getData();
-          outputs.value = analyzerData.averageAmplitude;
+          // Apply upstream gain
+          outputs.value = Math.min(1, analyzerData.averageAmplitude * inputGain);
           break;
         }
 
         case 'rms': {
           const analyzerData = analyzer.getData();
-          outputs.value = analyzerData.rmsLevel;
+          // Apply upstream gain
+          outputs.value = Math.min(1, analyzerData.rmsLevel * inputGain);
           break;
         }
 
@@ -378,9 +419,11 @@ class NodeRuntimeManager {
 
         case 'beat': {
           const threshold = Number(inputValues.threshold ?? 0.5);
-          const beatData = analyzer.detectBeat(threshold);
+          // Adjust threshold based on input gain for consistent beat detection
+          const adjustedThreshold = inputGain > 0 ? threshold / inputGain : threshold;
+          const beatData = analyzer.detectBeat(adjustedThreshold);
           outputs.detected = beatData.detected;
-          outputs.intensity = beatData.intensity;
+          outputs.intensity = Math.min(1, beatData.intensity * inputGain);
           outputs.trigger = beatData.detected ? 1 : 0;
           break;
         }
@@ -395,8 +438,9 @@ class NodeRuntimeManager {
             // Custom frequency range (FFT Band node)
             const low = Number(lowFreq);
             const high = Number(highFreq);
-            outputs.value = analyzer.getFrequencyRangeAdvanced(low, high, 'average');
-            outputs.peak = analyzer.getFrequencyRangeAdvanced(low, high, 'peak');
+            // Apply upstream gain
+            outputs.value = Math.min(1, analyzer.getFrequencyRangeAdvanced(low, high, 'average') * inputGain);
+            outputs.peak = Math.min(1, analyzer.getFrequencyRangeAdvanced(low, high, 'peak') * inputGain);
           } else {
             // Preset frequency band
             const band = data.frequencyBand;
@@ -412,10 +456,73 @@ class NodeRuntimeManager {
 
             if (band && bandRanges[band]) {
               const [low, high] = bandRanges[band];
-              outputs.value = analyzer.getFrequencyRangeAdvanced(low, high, 'average');
-              outputs.peak = analyzer.getFrequencyRangeAdvanced(low, high, 'peak');
+              // Apply upstream gain
+              outputs.value = Math.min(1, analyzer.getFrequencyRangeAdvanced(low, high, 'average') * inputGain);
+              outputs.peak = Math.min(1, analyzer.getFrequencyRangeAdvanced(low, high, 'peak') * inputGain);
             }
           }
+          break;
+        }
+
+        // Percussion detection nodes
+        case 'kick':
+        case 'snare':
+        case 'hihat':
+        case 'clap': {
+          const percType = data.audioType;
+          const detectorId = `${node.id}_${percType}`;
+
+          // Get parameters from inputs or config
+          const threshold = Number(inputValues.threshold ?? data.percussionConfig?.threshold ?? 1.5);
+          const cooldown = Number(inputValues.cooldown ?? data.percussionConfig?.cooldown ?? 100);
+          const holdTime = Number(inputValues.holdTime ?? data.percussionConfig?.holdTime ?? 100);
+          const lowFreq = Number(inputValues.lowFreq ?? data.percussionConfig?.lowFreq ?? 40);
+          const highFreq = Number(inputValues.highFreq ?? data.percussionConfig?.highFreq ?? 100);
+          const sensitivity = Number(
+            inputValues.sensitivity ??
+            (inputValues as Record<string, unknown>).transientSensitivity ??
+            data.percussionConfig?.transientSensitivity ??
+            0.7
+          );
+
+          // Create or update detector
+          if (!analyzer.getPercussionDetectorConfig(detectorId)) {
+            analyzer.createPercussionDetector(detectorId, {
+              type: percType as 'kick' | 'snare' | 'hihat' | 'clap',
+              threshold,
+              cooldown,
+              holdTime,
+              lowFreq,
+              highFreq,
+              transientSensitivity: sensitivity,
+              // Snare-specific secondary range
+              ...(percType === 'snare' && {
+                secondaryLowFreq: Number(inputValues.snapLow ?? data.percussionConfig?.secondaryLowFreq ?? 3000),
+                secondaryHighFreq: Number(inputValues.snapHigh ?? data.percussionConfig?.secondaryHighFreq ?? 8000),
+                secondaryWeight: Number(inputValues.snapWeight ?? data.percussionConfig?.secondaryWeight ?? 0.4),
+              }),
+            });
+          } else {
+            analyzer.updatePercussionDetector(detectorId, {
+              threshold,
+              cooldown,
+              holdTime,
+              lowFreq,
+              highFreq,
+              transientSensitivity: sensitivity,
+              ...(percType === 'snare' && {
+                secondaryLowFreq: Number(inputValues.snapLow ?? 3000),
+                secondaryHighFreq: Number(inputValues.snapHigh ?? 8000),
+                secondaryWeight: Number(inputValues.snapWeight ?? 0.4),
+              }),
+            });
+          }
+
+          const result = analyzer.detectPercussion(detectorId);
+          outputs.detected = result.detected;
+          outputs.intensity = result.intensity * inputGain;
+          outputs.trigger = result.detected ? 1 : 0;
+          outputs.energy = result.energy * inputGain;
           break;
         }
       }

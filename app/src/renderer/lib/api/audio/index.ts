@@ -52,9 +52,20 @@ export type {
   ErrorEvent,
   PeakEvent,
   BeatEvent,
+
+  // Percussion Detection Types
+  PercussionType,
+  FrequencyPreset,
+  PercussionDetectorConfig,
+  PercussionDetectionResult,
 } from './types';
 
-export { DEFAULT_ANALYZER_CONFIG, DEFAULT_NORMALIZATION_CONFIG } from './types';
+export {
+  DEFAULT_ANALYZER_CONFIG,
+  DEFAULT_NORMALIZATION_CONFIG,
+  FREQUENCY_PRESETS,
+  PERCUSSION_PRESETS,
+} from './types';
 
 // ============================================
 // Quick Start Example:

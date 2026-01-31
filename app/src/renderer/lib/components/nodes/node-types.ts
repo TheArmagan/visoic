@@ -58,6 +58,10 @@ export const nodeTypes: NodeTypesMap = {
   'audio:peak': AudioNode,
   'audio:bpm': AudioNode,
   'audio:beat': AudioNode,
+  'audio:kick': AudioNode,
+  'audio:snare': AudioNode,
+  'audio:hihat': AudioNode,
+  'audio:clap': AudioNode,
 
   // Logic nodes
   'logic:compare': LogicNode,
@@ -76,6 +80,7 @@ export const nodeTypes: NodeTypesMap = {
   'utility:trigger': UtilityNode,
   'utility:noise': UtilityNode,
   'utility:delay': UtilityNode,
+  'utility:hold': UtilityNode,
 
   // Output nodes
   'output:canvas': OutputNode,

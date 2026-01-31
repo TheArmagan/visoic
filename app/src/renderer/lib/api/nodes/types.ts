@@ -340,11 +340,13 @@ export interface ValueNodeData extends BaseNodeData {
 export interface AudioNodeData extends BaseNodeData {
   category: 'audio';
   /** Audio node subtype */
-  audioType: 'device' | 'analyzer' | 'normalizer' | 'fft' | 'band' | 'frequency-range' | 'amplitude' | 'rms' | 'peak' | 'bpm' | 'beat';
+  audioType: 'device' | 'analyzer' | 'normalizer' | 'fft' | 'band' | 'frequency-range' | 'amplitude' | 'rms' | 'peak' | 'bpm' | 'beat' | 'kick' | 'snare' | 'hihat' | 'clap';
   /** Device ID if applicable */
   deviceId?: string;
   /** Frequency band preset */
   frequencyBand?: 'subBass' | 'bass' | 'lowMid' | 'mid' | 'upperMid' | 'presence' | 'brilliance';
+  /** Frequency preset for frequency-range node */
+  frequencyPreset?: 'subBass' | 'bass' | 'lowMid' | 'mid' | 'upperMid' | 'presence' | 'brilliance' | 'kick' | 'snare' | 'hihat' | 'clap' | 'vocals' | 'custom';
   /** Calculation mode */
   calculationMode?: 'average' | 'peak' | 'rms' | 'sum' | 'weighted';
   /** Smoothing factor (0-1) */
@@ -369,6 +371,21 @@ export interface AudioNodeData extends BaseNodeData {
     compressorThreshold?: number;
     compressorRatio?: number;
   };
+  /** Percussion/transient detector config */
+  percussionConfig?: {
+    type: 'kick' | 'snare' | 'hihat' | 'clap' | 'tom' | 'cymbal' | 'custom';
+    threshold: number;
+    cooldown: number;
+    holdTime: number;
+    lowFreq: number;
+    highFreq: number;
+    secondaryLowFreq?: number;
+    secondaryHighFreq?: number;
+    secondaryWeight?: number;
+    transientSensitivity: number;
+    historySize: number;
+    useSpectralFlux: boolean;
+  };
 }
 
 export interface LogicNodeData extends BaseNodeData {
@@ -392,7 +409,7 @@ export interface LogicNodeData extends BaseNodeData {
 export interface UtilityNodeData extends BaseNodeData {
   category: 'utility';
   /** Utility type */
-  utilityType: 'time' | 'random' | 'noise' | 'smooth' | 'delay' | 'split' | 'combine' | 'accumulator' | 'oscillator' | 'expression' | 'trigger';
+  utilityType: 'time' | 'random' | 'noise' | 'smooth' | 'delay' | 'split' | 'combine' | 'accumulator' | 'oscillator' | 'expression' | 'trigger' | 'hold';
   /** Expression for computed/expression nodes */
   expression?: string;
   /** Accumulator settings */
@@ -432,6 +449,11 @@ export interface UtilityNodeData extends BaseNodeData {
   delayConfig?: {
     time?: number;
     bufferSize?: number;
+  };
+  /** Hold settings */
+  holdConfig?: {
+    /** Hold duration in ms */
+    holdTime?: number;
   };
   /** Internal state for stateful nodes */
   _state?: Record<string, unknown>;

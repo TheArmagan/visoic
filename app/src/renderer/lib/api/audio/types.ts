@@ -149,6 +149,186 @@ export interface AudioSourceConfig {
   channelCount?: number;
 }
 
+// ============================================
+// Sound Detection Types
+// ============================================
+
+/** Types of percussive sounds that can be detected */
+export type PercussionType = 'kick' | 'snare' | 'hihat' | 'clap' | 'tom' | 'cymbal' | 'custom';
+
+/** Preset frequency ranges for common audio bands */
+export type FrequencyPreset =
+  | 'subBass'      // 20-60 Hz
+  | 'bass'         // 60-250 Hz
+  | 'lowMid'       // 250-500 Hz
+  | 'mid'          // 500-2000 Hz
+  | 'upperMid'     // 2000-4000 Hz
+  | 'presence'     // 4000-6000 Hz
+  | 'brilliance'   // 6000-20000 Hz
+  | 'kick'         // 40-100 Hz (kick drum focus)
+  | 'snare'        // 150-350 Hz body + 3000-8000 Hz snap
+  | 'hihat'        // 6000-16000 Hz
+  | 'clap'         // 1000-5000 Hz
+  | 'vocals'       // 80-1100 Hz
+  | 'custom';
+
+/** Frequency preset definitions */
+export const FREQUENCY_PRESETS: Record<FrequencyPreset, { low: number; high: number; label: string }> = {
+  subBass: { low: 20, high: 60, label: 'Sub Bass' },
+  bass: { low: 60, high: 250, label: 'Bass' },
+  lowMid: { low: 250, high: 500, label: 'Low Mid' },
+  mid: { low: 500, high: 2000, label: 'Mid' },
+  upperMid: { low: 2000, high: 4000, label: 'Upper Mid' },
+  presence: { low: 4000, high: 6000, label: 'Presence' },
+  brilliance: { low: 6000, high: 20000, label: 'Brilliance' },
+  kick: { low: 40, high: 100, label: 'Kick' },
+  snare: { low: 150, high: 350, label: 'Snare Body' },
+  hihat: { low: 6000, high: 16000, label: 'Hi-Hat' },
+  clap: { low: 1000, high: 5000, label: 'Clap' },
+  vocals: { low: 80, high: 1100, label: 'Vocals' },
+  custom: { low: 20, high: 20000, label: 'Custom' },
+};
+
+/** Configuration for percussion/transient detection */
+export interface PercussionDetectorConfig {
+  /** Type of percussion to detect */
+  type: PercussionType;
+
+  /** Detection threshold (multiplier over average energy) */
+  threshold: number;
+
+  /** Minimum time between detections in ms */
+  cooldown: number;
+
+  /** Minimum duration that detection stays active in ms */
+  holdTime: number;
+
+  /** Low frequency of detection range in Hz */
+  lowFreq: number;
+
+  /** High frequency of detection range in Hz */
+  highFreq: number;
+
+  /** Secondary frequency range (for complex sounds like snare) */
+  secondaryLowFreq?: number;
+  secondaryHighFreq?: number;
+  secondaryWeight?: number;
+
+  /** Sensitivity to transients (0-1, higher = more sensitive to sharp attacks) */
+  transientSensitivity: number;
+
+  /** Energy history size for averaging */
+  historySize: number;
+
+  /** Use spectral flux instead of energy (better for transients) */
+  useSpectralFlux: boolean;
+}
+
+/** Default configurations for different percussion types */
+export const PERCUSSION_PRESETS: Record<PercussionType, PercussionDetectorConfig> = {
+  kick: {
+    type: 'kick',
+    threshold: 1.5,
+    cooldown: 150,
+    holdTime: 80,
+    lowFreq: 40,
+    highFreq: 120,
+    transientSensitivity: 0.8,
+    historySize: 45,
+    useSpectralFlux: false,
+  },
+  snare: {
+    type: 'snare',
+    threshold: 1.8,
+    cooldown: 100,
+    holdTime: 60,
+    lowFreq: 150,
+    highFreq: 400,
+    secondaryLowFreq: 2000,
+    secondaryHighFreq: 9000,
+    secondaryWeight: 0.3,
+    transientSensitivity: 0.8,
+    historySize: 30,
+    useSpectralFlux: true,
+  },
+  hihat: {
+    type: 'hihat',
+    threshold: 1.5,
+    cooldown: 50,
+    holdTime: 40,
+    lowFreq: 8000,
+    highFreq: 18000,
+    transientSensitivity: 0.9,
+    historySize: 15,
+    useSpectralFlux: true,
+  },
+  clap: {
+    type: 'clap',
+    threshold: 1.6,
+    cooldown: 100,
+    holdTime: 100,
+    lowFreq: 800,
+    highFreq: 4000,
+    transientSensitivity: 0.85,
+    historySize: 20,
+    useSpectralFlux: true,
+  },
+  tom: {
+    type: 'tom',
+    threshold: 1.6,
+    cooldown: 120,
+    holdTime: 100,
+    lowFreq: 80,
+    highFreq: 600,
+    transientSensitivity: 0.6,
+    historySize: 35,
+    useSpectralFlux: false,
+  },
+  cymbal: {
+    type: 'cymbal',
+    threshold: 1.4,
+    cooldown: 200,
+    holdTime: 150,
+    lowFreq: 5000,
+    highFreq: 20000,
+    transientSensitivity: 0.7,
+    historySize: 40,
+    useSpectralFlux: true,
+  },
+  custom: {
+    type: 'custom',
+    threshold: 1.5,
+    cooldown: 100,
+    holdTime: 100,
+    lowFreq: 20,
+    highFreq: 20000,
+    transientSensitivity: 0.5,
+    historySize: 43,
+    useSpectralFlux: false,
+  },
+};
+
+/** Result from percussion detection */
+export interface PercussionDetectionResult {
+  /** Whether the sound was detected */
+  detected: boolean;
+
+  /** Detection intensity (ratio of current energy to average) */
+  intensity: number;
+
+  /** Current energy level */
+  energy: number;
+
+  /** Average energy level */
+  averageEnergy: number;
+
+  /** Spectral flux value (if using spectral flux mode) */
+  spectralFlux?: number;
+
+  /** Timestamp of detection */
+  timestamp: number;
+}
+
 export type AudioEventType =
   | 'data'           // New analyzer data available
   | 'deviceChange'   // Audio devices changed

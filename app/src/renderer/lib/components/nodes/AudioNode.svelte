@@ -21,7 +21,10 @@
   const data = $derived(props.data);
 
   // Subscribe to outputValues changes from nodeGraph (runtime computed values)
-  const outputValues = useNodeProperty<AudioNodeData, "outputValues">(props.id, "outputValues");
+  const outputValues = useNodeProperty<AudioNodeData, "outputValues">(
+    props.id,
+    "outputValues",
+  );
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -32,9 +35,16 @@
     if (node) {
       // Deep merge for nested objects like inputValues
       for (const [key, value] of Object.entries(updates)) {
-        if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          !Array.isArray(value)
+        ) {
           (node.data as Record<string, unknown>)[key] = {
-            ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
+            ...(((node.data as Record<string, unknown>)[key] as Record<
+              string,
+              unknown
+            >) ?? {}),
             ...value,
           };
         } else {
@@ -98,6 +108,64 @@
     { value: "brilliance", label: "Brilliance (6-20kHz)" },
   ];
 
+  const frequencyPresets = [
+    { value: "custom", label: "Custom", low: 60, high: 250 },
+    { value: "subBass", label: "Sub Bass", low: 20, high: 60 },
+    { value: "bass", label: "Bass", low: 60, high: 250 },
+    { value: "lowMid", label: "Low Mid", low: 250, high: 500 },
+    { value: "mid", label: "Mid", low: 500, high: 2000 },
+    { value: "upperMid", label: "Upper Mid", low: 2000, high: 4000 },
+    { value: "presence", label: "Presence", low: 4000, high: 6000 },
+    { value: "brilliance", label: "Brilliance", low: 6000, high: 20000 },
+    { value: "kick", label: "Kick", low: 40, high: 100 },
+    { value: "snare", label: "Snare Body", low: 150, high: 350 },
+    { value: "hihat", label: "Hi-Hat", low: 6000, high: 16000 },
+    { value: "clap", label: "Clap", low: 1000, high: 5000 },
+    { value: "vocals", label: "Vocals", low: 80, high: 1100 },
+  ];
+
+  function applyFrequencyPreset(preset: string) {
+    const found = frequencyPresets.find((p) => p.value === preset);
+    if (found && found.value !== "custom") {
+      updateData({
+        frequencyPreset: preset as AudioNodeData["frequencyPreset"],
+        inputValues: {
+          ...data.inputValues,
+          lowFreq: found.low,
+          highFreq: found.high,
+        },
+      });
+    } else {
+      updateData({ frequencyPreset: "custom" as const });
+    }
+  }
+
+  function updatePercussionConfig(key: string, value: number) {
+    updateData({
+      percussionConfig: {
+        ...data.percussionConfig,
+        [key]: value,
+      },
+      inputValues: {
+        ...data.inputValues,
+        [key]: value,
+      },
+    });
+  }
+
+  function updateTransientSensitivity(value: number) {
+    updateData({
+      percussionConfig: {
+        ...data.percussionConfig,
+        transientSensitivity: value,
+      },
+      inputValues: {
+        ...data.inputValues,
+        sensitivity: value,
+      },
+    });
+  }
+
   function updateAnalyzerConfig(key: string, value: number | string) {
     updateData({
       analyzerConfig: {
@@ -153,8 +221,7 @@
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((outputValues.value?.volume as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.volume as number) ?? 0) * 100}%"
         ></div>
       </div>
     </div>
@@ -170,13 +237,16 @@
               const val = parseInt(v);
               const node = nodeGraph.getNode(props.id);
               if (node) {
-                if (node.data.analyzerConfig) node.data.analyzerConfig.fftSize = val;
+                if (node.data.analyzerConfig as any)
+                  (node.data.analyzerConfig as any).fftSize = val;
                 if (node.data.inputValues) node.data.inputValues.fftSize = val;
               }
               updateAnalyzerConfig("fftSize", val);
             }}
           >
-            <Select.Trigger class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag">
+            <Select.Trigger
+              class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            >
               {data.analyzerConfig?.fftSize ?? 2048}
             </Select.Trigger>
             <Select.Content>
@@ -194,14 +264,22 @@
             onValueChange={(v) => {
               const node = nodeGraph.getNode(props.id);
               if (node) {
-                if (node.data.analyzerConfig) node.data.analyzerConfig.windowFunction = v;
-                if (node.data.inputValues) node.data.inputValues.windowFunction = v;
+                if (node.data.analyzerConfig as any)
+                  (node.data.analyzerConfig as any).windowFunction = v;
+                if (node.data.inputValues)
+                  node.data.inputValues.windowFunction = v;
               }
               updateAnalyzerConfig("windowFunction", v);
             }}
           >
-            <Select.Trigger class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag">
-              {windowFunctions.find(w => w.value === (data.analyzerConfig?.windowFunction ?? "blackman"))?.label ?? "Blackman"}
+            <Select.Trigger
+              class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            >
+              {windowFunctions.find(
+                (w) =>
+                  w.value ===
+                  (data.analyzerConfig?.windowFunction ?? "blackman"),
+              )?.label ?? "Blackman"}
             </Select.Trigger>
             <Select.Content>
               {#each windowFunctions as wf}
@@ -224,11 +302,16 @@
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
             if (node) {
-              if (node.data.analyzerConfig) node.data.analyzerConfig.smoothing = val;
+              if (node.data.analyzerConfig as any)
+                (node.data.analyzerConfig as any).smoothing = val;
               if (node.data.inputValues) node.data.inputValues.smoothing = val;
             }
           }}
-          onchange={(e) => updateAnalyzerConfig("smoothing", parseFloat((e.target as HTMLInputElement).value))}
+          onchange={(e) =>
+            updateAnalyzerConfig(
+              "smoothing",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
         />
       </div>
       <div>
@@ -244,11 +327,16 @@
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
             if (node) {
-              if (node.data.analyzerConfig) node.data.analyzerConfig.gain = val;
+              if (node.data.analyzerConfig as any)
+                (node.data.analyzerConfig as any).gain = val;
               if (node.data.inputValues) node.data.inputValues.gain = val;
             }
           }}
-          onchange={(e) => updateAnalyzerConfig("gain", parseFloat((e.target as HTMLInputElement).value))}
+          onchange={(e) =>
+            updateAnalyzerConfig(
+              "gain",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
         />
       </div>
       <div class="grid grid-cols-2 gap-2">
@@ -265,11 +353,17 @@
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
               if (node) {
-                if (node.data.analyzerConfig) node.data.analyzerConfig.minDecibels = val;
-                if (node.data.inputValues) node.data.inputValues.minDecibels = val;
+                if (node.data.analyzerConfig as any)
+                  (node.data.analyzerConfig as any).minDecibels = val;
+                if (node.data.inputValues)
+                  node.data.inputValues.minDecibels = val;
               }
             }}
-            onchange={(e) => updateAnalyzerConfig("minDecibels", parseFloat((e.target as HTMLInputElement).value))}
+            onchange={(e) =>
+              updateAnalyzerConfig(
+                "minDecibels",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
           />
         </div>
         <div>
@@ -285,11 +379,17 @@
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
               if (node) {
-                if (node.data.analyzerConfig) node.data.analyzerConfig.maxDecibels = val;
-                if (node.data.inputValues) node.data.inputValues.maxDecibels = val;
+                if (node.data.analyzerConfig as any)
+                  (node.data.analyzerConfig as any).maxDecibels = val;
+                if (node.data.inputValues)
+                  node.data.inputValues.maxDecibels = val;
               }
             }}
-            onchange={(e) => updateAnalyzerConfig("maxDecibels", parseFloat((e.target as HTMLInputElement).value))}
+            onchange={(e) =>
+              updateAnalyzerConfig(
+                "maxDecibels",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
           />
         </div>
       </div>
@@ -297,8 +397,7 @@
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((outputValues.value?.volume as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.volume as number) ?? 0) * 100}%"
         ></div>
       </div>
     </div>
@@ -313,19 +412,16 @@
           min={0}
           max={1}
           step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node) {
-              if (node.data.normalizerConfig) {
-                node.data.normalizerConfig.targetLevel = val;
-              }
-              if (node.data.inputValues) {
-                node.data.inputValues.targetLevel = val;
-              }
-            }
-          }}
-          onchange={(e) => updateNormalizerConfig("targetLevel", parseFloat((e.target as HTMLInputElement).value))}
+          oninput={(e) =>
+            updateNormalizerConfig(
+              "targetLevel",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+          onchange={(e) =>
+            updateNormalizerConfig(
+              "targetLevel",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
         />
       </div>
       <div class="grid grid-cols-2 gap-2">
@@ -338,19 +434,16 @@
             min={0}
             max={1}
             step={0.01}
-            oninput={(e) => {
-              const val = parseFloat((e.target as HTMLInputElement).value);
-              const node = nodeGraph.getNode(props.id);
-              if (node) {
-                if (node.data.normalizerConfig) {
-                  node.data.normalizerConfig.minGain = val;
-                }
-                if (node.data.inputValues) {
-                  node.data.inputValues.minGain = val;
-                }
-              }
-            }}
-            onchange={(e) => updateNormalizerConfig("minGain", parseFloat((e.target as HTMLInputElement).value))}
+            oninput={(e) =>
+              updateNormalizerConfig(
+                "minGain",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+            onchange={(e) =>
+              updateNormalizerConfig(
+                "minGain",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
           />
         </div>
         <div>
@@ -362,19 +455,16 @@
             min={1}
             max={10}
             step={0.1}
-            oninput={(e) => {
-              const val = parseFloat((e.target as HTMLInputElement).value);
-              const node = nodeGraph.getNode(props.id);
-              if (node) {
-                if (node.data.normalizerConfig) {
-                  node.data.normalizerConfig.maxGain = val;
-                }
-                if (node.data.inputValues) {
-                  node.data.inputValues.maxGain = val;
-                }
-              }
-            }}
-            onchange={(e) => updateNormalizerConfig("maxGain", parseFloat((e.target as HTMLInputElement).value))}
+            oninput={(e) =>
+              updateNormalizerConfig(
+                "maxGain",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+            onchange={(e) =>
+              updateNormalizerConfig(
+                "maxGain",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
           />
         </div>
       </div>
@@ -387,19 +477,16 @@
           min={0.01}
           max={1}
           step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node) {
-              if (node.data.normalizerConfig) {
-                node.data.normalizerConfig.attackTime = val;
-              }
-              if (node.data.inputValues) {
-                node.data.inputValues.attackTime = val;
-              }
-            }
-          }}
-          onchange={(e) => updateNormalizerConfig("attackTime", parseFloat((e.target as HTMLInputElement).value))}
+          oninput={(e) =>
+            updateNormalizerConfig(
+              "attackTime",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+          onchange={(e) =>
+            updateNormalizerConfig(
+              "attackTime",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
         />
       </div>
       <div>
@@ -411,19 +498,16 @@
           min={0.01}
           max={1}
           step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node) {
-              if (node.data.normalizerConfig) {
-                node.data.normalizerConfig.releaseTime = val;
-              }
-              if (node.data.inputValues) {
-                node.data.inputValues.releaseTime = val;
-              }
-            }
-          }}
-          onchange={(e) => updateNormalizerConfig("releaseTime", parseFloat((e.target as HTMLInputElement).value))}
+          oninput={(e) =>
+            updateNormalizerConfig(
+              "releaseTime",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+          onchange={(e) =>
+            updateNormalizerConfig(
+              "releaseTime",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
         />
       </div>
       <!-- Gain output display -->
@@ -474,8 +558,7 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
@@ -484,20 +567,44 @@
     </div>
   {:else if data.audioType === "frequency-range"}
     <div class="space-y-2">
+      <!-- Preset Dropdown -->
+      <div>
+        <Label class="text-[10px] text-neutral-400">Preset</Label>
+        <Select.Root
+          type="single"
+          value={data.frequencyPreset ?? "custom"}
+          onValueChange={(v) => applyFrequencyPreset(v)}
+        >
+          <Select.Trigger
+            class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          >
+            {frequencyPresets.find(
+              (p) => p.value === (data.frequencyPreset ?? "custom"),
+            )?.label ?? "Custom"}
+          </Select.Trigger>
+          <Select.Content>
+            {#each frequencyPresets as preset}
+              <Select.Item value={preset.value}>{preset.label}</Select.Item>
+            {/each}
+          </Select.Content>
+        </Select.Root>
+      </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <Label class="text-[10px] text-neutral-400">Low Hz</Label>
           <Input
             type="number"
             value={data.inputValues?.lowFreq ?? 60}
-            oninput={(e) =>
+            oninput={(e) => {
               updateData({
+                frequencyPreset: "custom",
                 inputValues: {
                   ...data.inputValues,
                   lowFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 60,
                 },
-              })}
+              });
+            }}
             class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
           />
         </div>
@@ -506,14 +613,16 @@
           <Input
             type="number"
             value={data.inputValues?.highFreq ?? 250}
-            oninput={(e) =>
+            oninput={(e) => {
               updateData({
+                frequencyPreset: "custom",
                 inputValues: {
                   ...data.inputValues,
                   highFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 250,
                 },
-              })}
+              });
+            }}
             class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
           />
         </div>
@@ -524,14 +633,15 @@
           type="single"
           value={data.calculationMode ?? "average"}
           onValueChange={(v) =>
-            updateData({ calculationMode: v })}
+            updateData({
+              calculationMode: v as AudioNodeData["calculationMode"],
+            })}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
-            {calculationModes.find(
-              (m) => m.value === data.calculationMode,
-            )?.label ?? "Average"}
+            {calculationModes.find((m) => m.value === data.calculationMode)
+              ?.label ?? "Average"}
           </Select.Trigger>
           <Select.Content>
             {#each calculationModes as mode}
@@ -542,10 +652,10 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Smoothing: {(data.smoothing ?? 0).toFixed(2)}
+          Smoothing: {(data.smoothing ?? 0.1).toFixed(2)}
         </Label>
         <RangeSlider
-          value={data.smoothing ?? 0}
+          value={data.smoothing ?? 0.1}
           min={0}
           max={0.99}
           step={0.01}
@@ -556,15 +666,17 @@
               node.data.smoothing = val;
             }
           }}
-          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
+          onchange={(e) =>
+            updateData({
+              smoothing: parseFloat((e.target as HTMLInputElement).value),
+            })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-orange-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
@@ -589,15 +701,17 @@
               node.data.smoothing = val;
             }
           }}
-          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
+          onchange={(e) =>
+            updateData({
+              smoothing: parseFloat((e.target as HTMLInputElement).value),
+            })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-green-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
@@ -643,9 +757,7 @@
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Threshold: {Number(data.inputValues?.threshold ?? 0.5).toFixed(
-            2,
-          )}
+          Threshold: {Number(data.inputValues?.threshold ?? 0.5).toFixed(2)}
         </Label>
         <RangeSlider
           value={(data.inputValues?.threshold as number) ?? 0.5}
@@ -661,7 +773,10 @@
           }}
           onchange={(e) =>
             updateData({
-              inputValues: { ...data.inputValues, threshold: parseFloat((e.target as HTMLInputElement).value) },
+              inputValues: {
+                ...data.inputValues,
+                threshold: parseFloat((e.target as HTMLInputElement).value),
+              },
             })}
         />
       </div>
@@ -676,18 +791,238 @@
         </span>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Intensity: {(
-          (outputValues.value?.intensity as number) ?? 0
-        ).toFixed(3)}
+        Intensity: {((outputValues.value?.intensity as number) ?? 0).toFixed(3)}
       </span>
+    </div>
+  {:else if data.audioType === "kick" || data.audioType === "snare" || data.audioType === "hihat" || data.audioType === "clap"}
+    <!-- Percussion Detector Nodes -->
+    <div class="space-y-2">
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Threshold: {(
+              (data.inputValues?.threshold as number) ??
+              data.percussionConfig?.threshold ??
+              1.5
+            ).toFixed(2)}
+          </Label>
+          <RangeSlider
+            value={(data.inputValues?.threshold as number) ??
+              data.percussionConfig?.threshold ??
+              1.5}
+            min={1}
+            max={3}
+            step={0.05}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.inputValues) {
+                node.data.inputValues.threshold = val;
+              }
+            }}
+            onchange={(e) =>
+              updatePercussionConfig(
+                "threshold",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
+        </div>
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Cooldown: {(data.inputValues?.cooldown as number) ??
+              data.percussionConfig?.cooldown ??
+              100}ms
+          </Label>
+          <RangeSlider
+            value={(data.inputValues?.cooldown as number) ??
+              data.percussionConfig?.cooldown ??
+              100}
+            min={20}
+            max={300}
+            step={5}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.inputValues) {
+                node.data.inputValues.cooldown = val;
+              }
+            }}
+            onchange={(e) =>
+              updatePercussionConfig(
+                "cooldown",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
+        </div>
+      </div>
+      <div>
+        <Label class="text-[10px] text-neutral-400">
+          Hold Time: {(data.inputValues?.holdTime as number) ??
+            data.percussionConfig?.holdTime ??
+            100}ms
+        </Label>
+        <RangeSlider
+          value={(data.inputValues?.holdTime as number) ??
+            data.percussionConfig?.holdTime ??
+            100}
+          min={20}
+          max={500}
+          step={10}
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.inputValues) {
+              node.data.inputValues.holdTime = val;
+            }
+          }}
+          onchange={(e) =>
+            updatePercussionConfig(
+              "holdTime",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+        />
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <Label class="text-[10px] text-neutral-400">Low Hz</Label>
+          <Input
+            type="number"
+            value={(data.inputValues?.lowFreq as number) ??
+              data.percussionConfig?.lowFreq ??
+              40}
+            oninput={(e) =>
+              updatePercussionConfig(
+                "lowFreq",
+                parseFloat((e.target as HTMLInputElement).value) || 40,
+              )}
+            class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          />
+        </div>
+        <div>
+          <Label class="text-[10px] text-neutral-400">High Hz</Label>
+          <Input
+            type="number"
+            value={(data.inputValues?.highFreq as number) ??
+              data.percussionConfig?.highFreq ??
+              100}
+            oninput={(e) =>
+              updatePercussionConfig(
+                "highFreq",
+                parseFloat((e.target as HTMLInputElement).value) || 100,
+              )}
+            class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          />
+        </div>
+      </div>
+      <div>
+        <Label class="text-[10px] text-neutral-400">
+          Sensitivity: {(
+            (data.inputValues?.sensitivity as number) ??
+            data.percussionConfig?.transientSensitivity ??
+            0.7
+          ).toFixed(2)}
+        </Label>
+        <RangeSlider
+          value={(data.inputValues?.sensitivity as number) ??
+            data.percussionConfig?.transientSensitivity ??
+            0.7}
+          min={0}
+          max={1}
+          step={0.05}
+          oninput={(e) =>
+            updateTransientSensitivity(
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+          onchange={(e) =>
+            updateTransientSensitivity(
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+        />
+      </div>
+      {#if data.audioType === "snare"}
+        <!-- Snare-specific snap controls -->
+        <div class="grid grid-cols-3 gap-1 pt-1 border-t border-neutral-700">
+          <div>
+            <Label class="text-[10px] text-neutral-400">Snap Lo</Label>
+            <Input
+              type="number"
+              value={(data.inputValues?.snapLow as number) ??
+                data.percussionConfig?.secondaryLowFreq ??
+                3000}
+              oninput={(e) =>
+                updatePercussionConfig(
+                  "secondaryLowFreq",
+                  parseFloat((e.target as HTMLInputElement).value) || 3000,
+                )}
+              class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            />
+          </div>
+          <div>
+            <Label class="text-[10px] text-neutral-400">Snap Hi</Label>
+            <Input
+              type="number"
+              value={(data.inputValues?.snapHigh as number) ??
+                data.percussionConfig?.secondaryHighFreq ??
+                8000}
+              oninput={(e) =>
+                updatePercussionConfig(
+                  "secondaryHighFreq",
+                  parseFloat((e.target as HTMLInputElement).value) || 8000,
+                )}
+              class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            />
+          </div>
+          <div>
+            <Label class="text-[10px] text-neutral-400">Weight</Label>
+            <Input
+              type="number"
+              value={(data.inputValues?.snapWeight as number) ??
+                data.percussionConfig?.secondaryWeight ??
+                0.4}
+              oninput={(e) =>
+                updatePercussionConfig(
+                  "secondaryWeight",
+                  parseFloat((e.target as HTMLInputElement).value) || 0.4,
+                )}
+              class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+              step="0.1"
+              min="0"
+              max="1"
+            />
+          </div>
+        </div>
+      {/if}
+      <!-- Detection indicator -->
+      <div
+        class="h-8 rounded flex items-center justify-center transition-all duration-75"
+        class:bg-purple-500={outputValues.value?.detected}
+        class:bg-neutral-800={!outputValues.value?.detected}
+      >
+        <span class="text-xs font-bold">
+          {outputValues.value?.detected
+            ? data.audioType.toUpperCase() + "!"
+            : "—"}
+        </span>
+      </div>
+      <div class="flex justify-between text-[10px] text-neutral-500 font-mono">
+        <span
+          >Intensity: {((outputValues.value?.intensity as number) ?? 0).toFixed(
+            2,
+          )}</span
+        >
+        <span
+          >Energy: {((outputValues.value?.energy as number) ?? 0).toFixed(
+            3,
+          )}</span
+        >
+      </div>
     </div>
   {:else}
     <!-- Default preset bands (bass, mid, treble, etc.) -->
     <div class="space-y-2">
       {#if data.frequencyBand}
         <Label class="text-[10px] text-neutral-400">
-          {frequencyBands.find((b) => b.value === data.frequencyBand)
-            ?.label}
+          {frequencyBands.find((b) => b.value === data.frequencyBand)?.label}
         </Label>
       {/if}
       <div>
@@ -706,15 +1041,17 @@
               node.data.smoothing = val;
             }
           }}
-          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
+          onchange={(e) =>
+            updateData({
+              smoothing: parseFloat((e.target as HTMLInputElement).value),
+            })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) *
-            100}%"
+          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
@@ -723,6 +1060,3 @@
     </div>
   {/if}
 </BaseNode>
-
-
-

@@ -34,6 +34,18 @@ class NodeGraphManager {
   private listeners: Set<() => void> = new Set();
   private nodeListeners: Map<string, Set<(data: AnyNodeData) => void>> = new Map();
 
+  // Edge index for fast lookup: targetNodeId -> targetHandle -> edge
+  private edgeIndex: Map<string, Map<string, VisoicEdge>> = new Map();
+
+  // Cached arrays to avoid per-frame allocations
+  private cachedNodesArray: VisoicNode[] = [];
+  private cachedEdgesArray: VisoicEdge[] = [];
+  private nodesCacheValid = false;
+  private edgesCacheValid = false;
+
+  // Track dirty nodes for runtime optimization
+  private runtimeDirtyNodes: Set<string> = new Set();
+
   // ============================================
   // State Management
   // ============================================
@@ -56,6 +68,9 @@ class NodeGraphManager {
     for (const edge of state.edges) {
       this.edges.set(edge.id, edge);
     }
+
+    // Rebuild edge index after bulk load
+    this.rebuildEdgeIndex();
 
     this.isDirty = true;
     this.notifyListeners();
@@ -112,6 +127,9 @@ class NodeGraphManager {
   }
 
   private notifyListeners(): void {
+    // Invalidate caches when graph changes
+    this.invalidateCaches();
+
     for (const listener of this.listeners) {
       listener();
     }
@@ -143,6 +161,27 @@ class NodeGraphManager {
     this.notifyListeners();
 
     return node;
+  }
+
+  /**
+   * Add a node with a pre-defined id/data/position.
+   * Useful for import/paste/duplicate flows.
+   */
+  addNodeInstance(node: VisoicNode): void {
+    this.nodes.set(node.id, node);
+    this.isDirty = true;
+    this.notifyListeners();
+  }
+
+  /**
+   * Add multiple nodes in a single notification batch.
+   */
+  addNodeInstances(nodes: VisoicNode[]): void {
+    for (const node of nodes) {
+      this.nodes.set(node.id, node);
+    }
+    this.isDirty = true;
+    this.notifyListeners();
   }
 
   removeNode(nodeId: string): void {
@@ -195,8 +234,6 @@ class NodeGraphManager {
     this.notifyListeners();
   }
 
-  private runtimeDirtyNodes: Set<string> = new Set();
-
   /**
    * Update node data without triggering global listeners.
    * Use this for high-frequency updates like audio values that shouldn't cause re-renders.
@@ -241,12 +278,70 @@ class NodeGraphManager {
   }
 
   getNodes(): VisoicNode[] {
-    return Array.from(this.nodes.values());
+    if (!this.nodesCacheValid) {
+      this.cachedNodesArray = Array.from(this.nodes.values());
+      this.nodesCacheValid = true;
+    }
+    return this.cachedNodesArray;
+  }
+
+  getEdges(): VisoicEdge[] {
+    if (!this.edgesCacheValid) {
+      this.cachedEdgesArray = Array.from(this.edges.values());
+      this.edgesCacheValid = true;
+    }
+    return this.cachedEdgesArray;
+  }
+
+  // Invalidate caches when graph changes
+  private invalidateCaches(): void {
+    this.nodesCacheValid = false;
+    this.edgesCacheValid = false;
   }
 
   // ============================================
   // Edge Operations
   // ============================================
+
+  private addToEdgeIndex(edge: VisoicEdge): void {
+    if (!edge.targetHandle) return;
+    let targetMap = this.edgeIndex.get(edge.target);
+    if (!targetMap) {
+      targetMap = new Map();
+      this.edgeIndex.set(edge.target, targetMap);
+    }
+    targetMap.set(edge.targetHandle, edge);
+  }
+
+  private removeFromEdgeIndex(edge: VisoicEdge): void {
+    if (!edge.targetHandle) return;
+    const targetMap = this.edgeIndex.get(edge.target);
+    if (targetMap) {
+      targetMap.delete(edge.targetHandle);
+      if (targetMap.size === 0) {
+        this.edgeIndex.delete(edge.target);
+      }
+    }
+  }
+
+  private rebuildEdgeIndex(): void {
+    this.edgeIndex.clear();
+    for (const edge of this.edges.values()) {
+      this.addToEdgeIndex(edge);
+    }
+  }
+
+  // Fast O(1) edge lookup by target node and handle
+  getEdgeToInput(targetNodeId: string, targetHandle: string): VisoicEdge | undefined {
+    return this.edgeIndex.get(targetNodeId)?.get(targetHandle);
+  }
+
+  // Get all edges targeting a specific node - O(inputs) instead of O(all edges)
+  getEdgesToNode(targetNodeId: string): VisoicEdge[] {
+    const nodeEdges = this.edgeIndex.get(targetNodeId);
+    if (!nodeEdges) return [];
+    return Array.from(nodeEdges.values());
+  }
 
   addEdge(connection: Connection): VisoicEdge | null {
     if (!connection.source || !connection.target) return null;
@@ -274,8 +369,9 @@ class NodeGraphManager {
     }
 
     // Remove existing edge to this target handle (single connection per input)
-    for (const [edgeId, edge] of this.edges) {
-      if (edge.target === connection.target && edge.targetHandle === connection.targetHandle) {
+    for (const [edgeId, existingEdge] of this.edges) {
+      if (existingEdge.target === connection.target && existingEdge.targetHandle === connection.targetHandle) {
+        this.removeFromEdgeIndex(existingEdge);
         this.edges.delete(edgeId);
       }
     }
@@ -294,6 +390,7 @@ class NodeGraphManager {
     };
 
     this.edges.set(edgeId, edge);
+    this.addToEdgeIndex(edge);
     this.isDirty = true;
     this.notifyListeners();
 
@@ -301,21 +398,23 @@ class NodeGraphManager {
   }
 
   removeEdge(edgeId: string): void {
+    const edge = this.edges.get(edgeId);
+    if (edge) {
+      this.removeFromEdgeIndex(edge);
+    }
     this.edges.delete(edgeId);
     this.isDirty = true;
     this.notifyListeners();
   }
 
-  getEdges(): VisoicEdge[] {
-    return Array.from(this.edges.values());
-  }
-
   getInputEdges(nodeId: string): VisoicEdge[] {
-    return Array.from(this.edges.values()).filter((e) => e.target === nodeId);
+    // Use edge index for fast lookup
+    return this.getEdgesToNode(nodeId);
   }
 
   getOutputEdges(nodeId: string): VisoicEdge[] {
-    return Array.from(this.edges.values()).filter((e) => e.source === nodeId);
+    // This is less optimized but getOutputEdges is rarely called in hot paths
+    return this.getEdges().filter((e) => e.source === nodeId);
   }
 
   // ============================================
@@ -403,13 +502,11 @@ class NodeGraphManager {
         const result = this.evaluateNode(node, context);
         this.nodeOutputCache.set(nodeId, result.outputs);
 
-        // Update node's output values
+        // Update node's output values in place (no UI notification during hot loop)
+        // UI components use subscribeToNode for their own updates
         node.data.outputValues = result.outputs;
         node.data.hasError = false;
         node.data.errorMessage = undefined;
-
-        // Notify listeners for UI update
-        this.notifyNodeListeners(nodeId, node.data);
       } catch (error) {
         console.error(`Error evaluating node ${nodeId}:`, error);
         node.data.hasError = true;
@@ -426,10 +523,8 @@ class NodeGraphManager {
     const inputValues: Record<string, unknown> = {};
 
     for (const input of node.data.inputs) {
-      // Check if there's an edge connected to this input
-      const edge = Array.from(this.edges.values()).find(
-        (e) => e.target === node.id && e.targetHandle === input.id
-      );
+      // Fast O(1) edge lookup using index
+      const edge = this.getEdgeToInput(node.id, input.id);
 
       if (edge) {
         // Get value from connected node's output
@@ -874,6 +969,32 @@ class NodeGraphManager {
 
         data._state.buffer = buffer;
         outputs.delayed = delayedValue;
+        break;
+      }
+
+      case 'hold': {
+        const trigger = Boolean(inputs.trigger);
+        const inputValue = Number(inputs.value ?? 1);
+        const holdTimeMs = Number(inputs.holdTime ?? 100);
+        const now = performance.now();
+
+        let holdUntil = Number(data._state.holdUntil ?? 0);
+        let heldValue = Number(data._state.heldValue ?? 0);
+
+        // Check if trigger is active (new trigger)
+        if (trigger) {
+          holdUntil = now + holdTimeMs;
+          heldValue = inputValue;
+        }
+
+        // Check if still in hold period
+        const isActive = now < holdUntil;
+
+        data._state.holdUntil = holdUntil;
+        data._state.heldValue = heldValue;
+
+        outputs.active = isActive;
+        outputs.value = isActive ? heldValue : 0;
         break;
       }
     }

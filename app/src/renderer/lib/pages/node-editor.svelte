@@ -65,7 +65,9 @@
   } | null>(null);
 
   // Copy/paste state
-  let clipboard = $state<{ nodes: VisoicNode[]; edges: VisoicEdge[] } | null>(null);
+  let clipboard = $state<{ nodes: VisoicNode[]; edges: VisoicEdge[] } | null>(
+    null,
+  );
   let lastPastePosition = $state({ x: 0, y: 0 });
 
   // Context menu state
@@ -74,6 +76,10 @@
 
   // SvelteFlow instance (will be set by FlowHelper)
   let svelteFlowInstance: ReturnType<typeof useSvelteFlow> | null = null;
+
+  // Interaction state - used to skip heavy updates during zoom/drag
+  let isInteracting = $state(false);
+  let graphSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Hooks
   const nodeOps = useNodeOperations();
@@ -110,35 +116,6 @@
       if (nodeRuntime.running) {
         frameCount = nodeRuntime.currentFrame;
         currentTime = nodeRuntime.currentTime;
-        
-        // Check for silent updates from runtime
-        const dirtyNodes = nodeGraph.getAndClearRuntimeDirtyNodes();
-        if (dirtyNodes.size > 0) {
-          // Only update specific nodes to avoid full re-render
-          // We create a new array reference for Svelte reactivity, but keep object refs for unchanged nodes
-          nodes = nodes.map(n => {
-            if (dirtyNodes.has(n.id)) {
-              // Node has new data in graph (updated in place)
-              // Preserve position and selection from UI state if not syncing from graph
-              // The graph node data is updated in place, so spread n spreads the updated data
-              // BUT we must be careful not to overwrite UI-only state like 'selected', 'dragging', 'position'
-              // if the graph update doesn't include them or has old values.
-              
-              // Actually, Svelte Flow keeps 'selected', 'dragging', 'measured', 'width', 'height' in 'n'
-              // but nodeGraph stores user data in 'n.data'
-              
-              // We should only update 'data' property if that's what changed
-              const graphNode = nodeGraph.getNode(n.id);
-              if (graphNode) {
-                return { 
-                  ...n, 
-                  data: graphNode.data
-                };
-              }
-            }
-            return n;
-          });
-        }
       }
     }, 100);
   });
@@ -148,19 +125,22 @@
     if (statsInterval) {
       clearInterval(statsInterval);
     }
+    if (graphSyncTimer) {
+      clearTimeout(graphSyncTimer);
+    }
     // Don't stop runtime on destroy - keep it running
   });
 
-  // Subscribe to graph changes
-  nodeGraph.subscribe(() => {
+  // Debounced graph sync function
+  function syncNodesFromGraph() {
     const currentNodes = nodeGraph.getNodes();
     // Ensure all node types are registered before updating state
     syncNodeTypesWithRegistry(currentNodes.map((n) => n.type));
-    
+
     // Create map of current UI nodes to preserve selection/drag state
-    const uiNodeMap = new Map(nodes.map(n => [n.id, n]));
-    
-    nodes = currentNodes.map(graphNode => {
+    const uiNodeMap = new Map(nodes.map((n) => [n.id, n]));
+
+    nodes = currentNodes.map((graphNode) => {
       const uiNode = uiNodeMap.get(graphNode.id);
       if (uiNode) {
         return {
@@ -174,19 +154,35 @@
           width: uiNode.width,
           height: uiNode.height,
           // If dragging, prefer UI position to avoid fighting
-          position: uiNode.dragging ? uiNode.position : graphNode.position
+          position: uiNode.dragging ? uiNode.position : graphNode.position,
         };
       }
       return graphNode;
     });
-    
+
     // Preserve edge selection state
     const currentEdges = nodeGraph.getEdges();
-    const uiEdgeMap = new Map(edges.map(e => [e.id, e]));
-    edges = currentEdges.map(graphEdge => {
+    const uiEdgeMap = new Map(edges.map((e) => [e.id, e]));
+    edges = currentEdges.map((graphEdge) => {
       const uiEdge = uiEdgeMap.get(graphEdge.id);
       return uiEdge ? { ...graphEdge, selected: uiEdge.selected } : graphEdge;
     });
+  }
+
+  // Subscribe to graph changes - debounced during interaction
+  nodeGraph.subscribe(() => {
+    // Skip sync during active interaction (zoom/drag) to prevent preview freeze
+    if (isInteracting) {
+      // Schedule sync for after interaction ends
+      if (graphSyncTimer) clearTimeout(graphSyncTimer);
+      graphSyncTimer = setTimeout(() => {
+        if (!isInteracting) {
+          syncNodesFromGraph();
+        }
+      }, 100);
+      return;
+    }
+    syncNodesFromGraph();
   });
 
   // Toggle runtime
@@ -277,7 +273,11 @@
   }
 
   // Handle output handle double click - open node search popup
-  function handleOutputHandleDoubleClick(nodeId: string, handle: any, event: MouseEvent) {
+  function handleOutputHandleDoubleClick(
+    nodeId: string,
+    handle: any,
+    event: MouseEvent,
+  ) {
     searchPopupPosition = { x: event.clientX, y: event.clientY };
     // Calculate flow position
     if (svelteFlowInstance) {
@@ -365,20 +365,20 @@
 
   // Copy selected nodes
   function copySelectedNodes() {
-    const selectedNodes = nodes.filter(n => n.selected);
+    const selectedNodes = nodes.filter((n) => n.selected);
     if (selectedNodes.length === 0) return;
 
     // Get edges between selected nodes
-    const selectedNodeIds = new Set(selectedNodes.map(n => n.id));
-    const selectedEdges = edges.filter(e => 
-      selectedNodeIds.has(e.source) && selectedNodeIds.has(e.target)
+    const selectedNodeIds = new Set(selectedNodes.map((n) => n.id));
+    const selectedEdges = edges.filter(
+      (e) => selectedNodeIds.has(e.source) && selectedNodeIds.has(e.target),
     );
 
     clipboard = {
       nodes: JSON.parse(JSON.stringify(selectedNodes)),
-      edges: JSON.parse(JSON.stringify(selectedEdges))
+      edges: JSON.parse(JSON.stringify(selectedEdges)),
     };
-    
+
     // Reset paste position
     lastPastePosition = { x: 0, y: 0 };
   }
@@ -392,31 +392,31 @@
     lastPastePosition = offset;
 
     // Find min position in clipboard to calculate relative positions
-    const minX = Math.min(...clipboard.nodes.map(n => n.position.x));
-    const minY = Math.min(...clipboard.nodes.map(n => n.position.y));
+    const minX = Math.min(...clipboard.nodes.map((n) => n.position.x));
+    const minY = Math.min(...clipboard.nodes.map((n) => n.position.y));
 
     // Create ID mapping for new nodes
     const idMap = new Map<string, string>();
 
     // Add nodes with new IDs and offset positions
     for (const node of clipboard.nodes) {
-      const newId = `${node.type.replace(':', '_')}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      const newId = `${node.type.replace(":", "_")}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       idMap.set(node.id, newId);
 
       const newPosition = {
         x: node.position.x - minX + offset.x,
-        y: node.position.y - minY + offset.y
+        y: node.position.y - minY + offset.y,
       };
 
       // Deep clone the data
       const newData = JSON.parse(JSON.stringify(node.data));
-      
+
       // Add to graph
-      nodeGraph.addNode({
+      nodeGraph.addNodeInstance({
         id: newId,
         type: node.type,
         position: newPosition,
-        data: newData
+        data: newData,
       } as VisoicNode);
     }
 
@@ -424,13 +424,13 @@
     for (const edge of clipboard.edges) {
       const newSource = idMap.get(edge.source);
       const newTarget = idMap.get(edge.target);
-      
+
       if (newSource && newTarget) {
         edgeOps.addEdge({
           source: newSource,
           target: newTarget,
           sourceHandle: edge.sourceHandle,
-          targetHandle: edge.targetHandle
+          targetHandle: edge.targetHandle,
         });
       }
     }
@@ -441,19 +441,19 @@
     const node = nodeGraph.getNode(nodeId);
     if (!node) return;
 
-    const newId = `${node.type.replace(':', '_')}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newId = `${node.type.replace(":", "_")}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const newPosition = {
       x: node.position.x + 50,
-      y: node.position.y + 50
+      y: node.position.y + 50,
     };
 
     const newData = JSON.parse(JSON.stringify(node.data));
-    
-    nodeGraph.addNode({
+
+    nodeGraph.addNodeInstance({
       id: newId,
       type: node.type,
       position: newPosition,
-      data: newData
+      data: newData,
     } as VisoicNode);
   }
 
@@ -489,7 +489,7 @@
       } else if (event.key === "d") {
         event.preventDefault();
         // Duplicate selected nodes
-        const selectedNodes = nodes.filter(n => n.selected);
+        const selectedNodes = nodes.filter((n) => n.selected);
         for (const node of selectedNodes) {
           duplicateNode(node.id);
         }
@@ -561,13 +561,23 @@
   <!-- Main Flow -->
   <div class="w-full h-full">
     <SvelteFlow
-      bind:nodes={nodes}
-      bind:edges={edges}
+      bind:nodes
+      bind:edges
       nodeTypes={dynamicNodeTypes}
       {isValidConnection}
       onconnect={onConnect}
       ondelete={onDelete}
-      onnodedragstop={onNodeDragStop}
+      onnodedragstart={() => (isInteracting = true)}
+      onnodedragstop={(e) => {
+        isInteracting = false;
+        onNodeDragStop(e);
+      }}
+      onmovestart={() => (isInteracting = true)}
+      onmoveend={() => {
+        isInteracting = false;
+        // Trigger sync after interaction ends
+        syncNodesFromGraph();
+      }}
       onconnectend={onConnectEnd}
       onnodecontextmenu={(event) => {
         handleNodeContextMenu(event.event, event.node.id);
@@ -586,8 +596,8 @@
     >
       <Background bgColor="#0a0a0a" variant={BackgroundVariant.Dots} gap={16} />
       <Controls class="bg-neutral-900! border-neutral-700! rounded-lg!" />
-      <FlowHelper 
-        onInit={(instance) => svelteFlowInstance = instance} 
+      <FlowHelper
+        onInit={(instance) => (svelteFlowInstance = instance)}
         onOutputHandleDoubleClick={handleOutputHandleDoubleClick}
       />
       <MiniMap
@@ -621,11 +631,11 @@
   {#if contextMenuNode}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div 
+    <div
       class="fixed inset-0 z-40"
-      onclick={() => contextMenuNode = null}
+      onclick={() => (contextMenuNode = null)}
     ></div>
-    <div 
+    <div
       class="fixed z-50 min-w-[160px] rounded-md border border-neutral-700 bg-neutral-900 p-1 shadow-lg"
       style="left: {contextMenuPosition.x}px; top: {contextMenuPosition.y}px;"
     >
@@ -644,11 +654,11 @@
         class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
         onclick={() => {
           // Select this node and copy
-          const node = nodes.find(n => n.id === contextMenuNode);
+          const node = nodes.find((n) => n.id === contextMenuNode);
           if (node) {
             clipboard = {
               nodes: [JSON.parse(JSON.stringify(node))],
-              edges: []
+              edges: [],
             };
             lastPastePosition = { x: 0, y: 0 };
           }
@@ -678,11 +688,11 @@
   {#if showPaneContextMenu}
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div 
+    <div
       class="fixed inset-0 z-40"
-      onclick={() => showPaneContextMenu = false}
+      onclick={() => (showPaneContextMenu = false)}
     ></div>
-    <div 
+    <div
       class="fixed z-50 min-w-[160px] rounded-md border border-neutral-700 bg-neutral-900 p-1 shadow-lg"
       style="left: {paneContextMenuPosition.x}px; top: {paneContextMenuPosition.y}px;"
     >

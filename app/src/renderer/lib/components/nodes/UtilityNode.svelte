@@ -20,7 +20,10 @@
   const data = $derived(props.data);
 
   // Subscribe to outputValues changes from nodeGraph (runtime computed values)
-  const outputValues = useNodeProperty<UtilityNodeData, "outputValues">(props.id, "outputValues");
+  const outputValues = useNodeProperty<UtilityNodeData, "outputValues">(
+    props.id,
+    "outputValues",
+  );
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -29,9 +32,16 @@
     const node = nodeGraph.getNode(props.id);
     if (node) {
       for (const [key, value] of Object.entries(updates)) {
-        if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          !Array.isArray(value)
+        ) {
           (node.data as Record<string, unknown>)[key] = {
-            ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
+            ...(((node.data as Record<string, unknown>)[key] as Record<
+              string,
+              unknown
+            >) ?? {}),
             ...value,
           };
         } else {
@@ -187,8 +197,12 @@
               node.data.accumulatorConfig.rate = val;
             }
           }}
-          onchange={(e) => updateAccumulatorConfig("rate", parseFloat((e.target as HTMLInputElement).value))}
-          />
+          onchange={(e) =>
+            updateAccumulatorConfig(
+              "rate",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+        />
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
@@ -242,9 +256,8 @@
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
-            {wrapModes.find(
-              (m) => m.value === data.accumulatorConfig?.wrapMode,
-            )?.label ?? "Wrap"}
+            {wrapModes.find((m) => m.value === data.accumulatorConfig?.wrapMode)
+              ?.label ?? "Wrap"}
           </Select.Trigger>
           <Select.Content>
             {#each wrapModes as mode}
@@ -276,9 +289,8 @@
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
-            {waveforms.find(
-              (w) => w.value === data.oscillatorConfig?.waveform,
-            )?.label ?? "Sine"}
+            {waveforms.find((w) => w.value === data.oscillatorConfig?.waveform)
+              ?.label ?? "Sine"}
           </Select.Trigger>
           <Select.Content>
             {#each waveforms as waveform}
@@ -303,8 +315,12 @@
               node.data.oscillatorConfig.frequency = val;
             }
           }}
-          onchange={(e) => updateOscillatorConfig("frequency", parseFloat((e.target as HTMLInputElement).value))}
-          />
+          onchange={(e) =>
+            updateOscillatorConfig(
+              "frequency",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+        />
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
@@ -322,15 +338,19 @@
               node.data.oscillatorConfig.phase = val;
             }
           }}
-          onchange={(e) => updateOscillatorConfig("phase", parseFloat((e.target as HTMLInputElement).value))}
-          />
+          onchange={(e) =>
+            updateOscillatorConfig(
+              "phase",
+              parseFloat((e.target as HTMLInputElement).value),
+            )}
+        />
       </div>
       {#if data.oscillatorConfig?.waveform === "pulse"}
         <div>
           <Label class="text-[10px] text-neutral-400">
-            Duty: {(
-              (data.oscillatorConfig?.pulseWidth ?? 0.5) * 100
-            ).toFixed(0)}%
+            Duty: {((data.oscillatorConfig?.pulseWidth ?? 0.5) * 100).toFixed(
+              0,
+            )}%
           </Label>
           <RangeSlider
             value={data.oscillatorConfig?.pulseWidth ?? 0.5}
@@ -344,8 +364,12 @@
                 node.data.oscillatorConfig.pulseWidth = val;
               }
             }}
-            onchange={(e) => updateOscillatorConfig("pulseWidth", parseFloat((e.target as HTMLInputElement).value))}
-            />
+            onchange={(e) =>
+              updateOscillatorConfig(
+                "pulseWidth",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
         </div>
       {/if}
       <!-- Oscillator visualization -->
@@ -401,9 +425,8 @@
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
-            {triggerModes.find(
-              (m) => m.value === data.triggerConfig?.mode,
-            )?.label ?? "Rising Edge"}
+            {triggerModes.find((m) => m.value === data.triggerConfig?.mode)
+              ?.label ?? "Rising Edge"}
           </Select.Trigger>
           <Select.Content>
             {#each triggerModes as mode}
@@ -430,9 +453,12 @@
           }}
           onchange={(e) =>
             updateData({
-              triggerConfig: { ...data.triggerConfig, threshold: parseFloat((e.target as HTMLInputElement).value) },
+              triggerConfig: {
+                ...data.triggerConfig,
+                threshold: parseFloat((e.target as HTMLInputElement).value),
+              },
             })}
-          />
+        />
       </div>
       <!-- Trigger indicator -->
       <div
@@ -465,9 +491,12 @@
           }}
           onchange={(e) =>
             updateData({
-              noiseConfig: { ...data.noiseConfig, octaves: parseInt((e.target as HTMLInputElement).value) },
+              noiseConfig: {
+                ...data.noiseConfig,
+                octaves: parseInt((e.target as HTMLInputElement).value),
+              },
             })}
-          />
+        />
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
         Value: {(value as number).toFixed(4)}
@@ -493,18 +522,66 @@
           }}
           onchange={(e) =>
             updateData({
-              delayConfig: { ...data.delayConfig, time: parseFloat((e.target as HTMLInputElement).value) },
+              delayConfig: {
+                ...data.delayConfig,
+                time: parseFloat((e.target as HTMLInputElement).value),
+              },
             })}
-          />
+        />
       </div>
       <div class="flex gap-2 text-[10px] text-neutral-500 font-mono">
-        <span
-          >In: {((data.inputValues?.value as number) ?? 0).toFixed(
-            3,
-          )}</span
-        >
+        <span>In: {((data.inputValues?.value as number) ?? 0).toFixed(3)}</span>
         <span>→</span>
         <span>Out: {(value as number).toFixed(3)}</span>
+      </div>
+    </div>
+  {:else if data.utilityType === "hold"}
+    <div class="space-y-2">
+      <div>
+        <Label class="text-[10px] text-neutral-400">
+          Hold Time: {data.holdConfig?.holdTime ?? 100}ms
+        </Label>
+        <RangeSlider
+          value={data.holdConfig?.holdTime ?? 100}
+          min={10}
+          max={1000}
+          step={10}
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.holdConfig) {
+              node.data.holdConfig.holdTime = val;
+            }
+            if (node && node.data.inputValues) {
+              node.data.inputValues.holdTime = val;
+            }
+          }}
+          onchange={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            updateData({
+              holdConfig: { ...data.holdConfig, holdTime: val },
+              inputValues: { ...data.inputValues, holdTime: val },
+            });
+          }}
+        />
+      </div>
+      <!-- Active indicator -->
+      <div
+        class="h-6 rounded flex items-center justify-center transition-all duration-75"
+        class:bg-green-500={outputValues.value?.active}
+        class:bg-neutral-800={!outputValues.value?.active}
+      >
+        <span class="text-xs font-bold">
+          {outputValues.value?.active ? "ACTIVE" : "—"}
+        </span>
+      </div>
+      <div class="flex justify-between text-[10px] text-neutral-500 font-mono">
+        <span>Trigger: {data.inputValues?.trigger ? "ON" : "OFF"}</span>
+        <span
+          >Value: {((outputValues.value?.value as number) ?? 0).toFixed(
+            2,
+          )}</span
+        >
       </div>
     </div>
   {:else}
@@ -513,6 +590,3 @@
     </div>
   {/if}
 </BaseNode>
-
-
-

@@ -8,8 +8,13 @@ import type {
   FrequencyBandData,
   FFTSize,
   NormalizationConfig,
+  PercussionDetectorConfig,
+  PercussionDetectionResult,
+  PercussionType,
 } from './types';
-import { DEFAULT_ANALYZER_CONFIG, DEFAULT_NORMALIZATION_CONFIG } from './types';
+import { DEFAULT_ANALYZER_CONFIG, DEFAULT_NORMALIZATION_CONFIG, PERCUSSION_PRESETS } from './types';
+
+import Meyda from 'meyda';
 
 let analyzerIdCounter = 0;
 
@@ -55,6 +60,110 @@ export class FFTAnalyzer {
   private currentNormalizationGain = 1.0;
   private rmsHistory: number[] = [];
   private readonly rmsHistorySize = 30; // ~0.5 second at 60fps
+
+  // Percussion detection state
+  private percussionDetectors: Map<string, {
+    config: PercussionDetectorConfig;
+    energyHistory: number[];
+    fluxHistory: number[];
+    rmsHistory: number[];
+    lastDetectionTime: number;
+    holdUntilTime: number;
+    lastIntensity: number;
+    lastEnergy: number;
+    lastAverageEnergy: number;
+    previousSpectrum: Float32Array | null;
+  }> = new Map();
+
+  private frequencyRangeToSpectrumBins(lowFreq: number, highFreq: number, spectrumLength: number): { lowBin: number; highBin: number } {
+    const sampleRate = this.audioContext.sampleRate;
+    const nyquist = sampleRate / 2;
+    const binWidth = nyquist / spectrumLength;
+
+    const lowBin = Math.max(0, Math.floor(lowFreq / binWidth));
+    const highBin = Math.min(Math.ceil(highFreq / binWidth), spectrumLength - 1);
+    return { lowBin, highBin };
+  }
+
+  private calculateSpectrumBandEnergy(spectrum: Float32Array, lowFreq: number, highFreq: number): number {
+    const { lowBin, highBin } = this.frequencyRangeToSpectrumBins(lowFreq, highFreq, spectrum.length);
+    if (lowBin >= highBin) return 0;
+
+    let sumSq = 0;
+    for (let i = lowBin; i <= highBin; i++) {
+      const v = spectrum[i];
+      sumSq += v * v;
+    }
+    return Math.sqrt(sumSq / (highBin - lowBin + 1));
+  }
+
+  private computeSpectralFlux(current: Float32Array, previous: Float32Array | null): number {
+    if (!previous || previous.length !== current.length) return 0;
+    let flux = 0;
+    for (let i = 0; i < current.length; i++) {
+      const diff = current[i] - previous[i];
+      if (diff > 0) flux += diff * diff;
+    }
+    return Math.sqrt(flux / current.length);
+  }
+
+  private sanitizeFinite(value: unknown, fallback = 0): number {
+    const n = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  private clamp(value: number, min: number, max: number): number {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  private percussionFeatureMatch(type: PercussionType, features: { spectralCentroid?: number; spectralFlatness?: number; zcr?: number }): number {
+    const centroid = features.spectralCentroid ?? 0;
+    const flatness = features.spectralFlatness ?? 0;
+    const zcr = features.zcr ?? 0;
+
+    // Returns 0..1 where 1 means "looks like this percussion type"
+    switch (type) {
+      case 'kick': {
+        const centroidOk = centroid > 0 && centroid < 1500;
+        const zcrOk = zcr < 0.12;
+        const flatOk = flatness < 0.55;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'snare': {
+        const centroidOk = centroid > 1200 && centroid < 6500;
+        const zcrOk = zcr > 0.05 && zcr < 0.22;
+        const flatOk = flatness > 0.15;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'clap': {
+        const centroidOk = centroid > 1500 && centroid < 8000;
+        const zcrOk = zcr > 0.08;
+        const flatOk = flatness > 0.2;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'hihat': {
+        const centroidOk = centroid > 5500;
+        const zcrOk = zcr > 0.12;
+        const flatOk = flatness > 0.35;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'cymbal': {
+        const centroidOk = centroid > 4500;
+        const zcrOk = zcr > 0.1;
+        const flatOk = flatness > 0.3;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'tom': {
+        const centroidOk = centroid > 0 && centroid < 2500;
+        const zcrOk = zcr < 0.14;
+        const flatOk = flatness < 0.6;
+        return (Number(centroidOk) + Number(zcrOk) + Number(flatOk)) / 3;
+      }
+      case 'custom':
+      default:
+        return 1;
+    }
+  }
 
   constructor(
     audioContext: AudioContext,
@@ -909,6 +1018,349 @@ export class FFTAnalyzer {
     return Math.sqrt(sum / this.timeDomainData.length);
   }
 
+  // ==========================================
+  // Percussion Detection
+  // ==========================================
+
+  /**
+   * Create or update a percussion detector
+   */
+  createPercussionDetector(id: string, config: Partial<PercussionDetectorConfig> & { type: PercussionType }): void {
+    const preset = PERCUSSION_PRESETS[config.type] || PERCUSSION_PRESETS.custom;
+    const fullConfig: PercussionDetectorConfig = { ...preset, ...config };
+
+    this.percussionDetectors.set(id, {
+      config: fullConfig,
+      energyHistory: [],
+      fluxHistory: [],
+      rmsHistory: [],
+      lastDetectionTime: 0,
+      holdUntilTime: 0,
+      lastIntensity: 0,
+      lastEnergy: 0,
+      lastAverageEnergy: 0,
+      previousSpectrum: null,
+    });
+  }
+
+  /**
+   * Update percussion detector configuration
+   */
+  updatePercussionDetector(id: string, config: Partial<PercussionDetectorConfig>): boolean {
+    const detector = this.percussionDetectors.get(id);
+    if (!detector) return false;
+
+    detector.config = { ...detector.config, ...config };
+    return true;
+  }
+
+  /**
+   * Remove a percussion detector
+   */
+  removePercussionDetector(id: string): boolean {
+    return this.percussionDetectors.delete(id);
+  }
+
+  /**
+   * Get percussion detector configuration
+   */
+  getPercussionDetectorConfig(id: string): PercussionDetectorConfig | undefined {
+    return this.percussionDetectors.get(id)?.config;
+  }
+
+  /**
+   * Detect percussion/transient sounds with configurable parameters
+   */
+  detectPercussion(id: string): PercussionDetectionResult {
+    const detector = this.percussionDetectors.get(id);
+    if (!detector) {
+      return {
+        detected: false,
+        intensity: 0,
+        energy: 0,
+        averageEnergy: 0,
+        timestamp: performance.now(),
+      };
+    }
+
+    const { config, energyHistory, fluxHistory, rmsHistory, lastDetectionTime, holdUntilTime, previousSpectrum } = detector;
+    const now = performance.now();
+
+    // Check if we're still in hold period from previous detection
+    const inHoldPeriod = now < holdUntilTime;
+    if (inHoldPeriod) {
+      // Return the stored values from when detection occurred
+      return {
+        detected: true,
+        intensity: detector.lastIntensity,
+        energy: detector.lastEnergy,
+        averageEnergy: detector.lastAverageEnergy,
+        timestamp: now,
+      };
+    }
+
+    // Pull fresh time-domain buffer (more reliable for transients than AnalyserNode's smoothed spectrum)
+    this.analyzerNode.getFloatTimeDomainData(this.timeDomainData);
+
+    const bufferSize = this.timeDomainData.length;
+    const sampleRate = this.audioContext.sampleRate;
+
+    // Meyda feature extraction
+    // NOTE: Meyda can return arrays as number[]; normalize to Float32Array for performance.
+    // Meyda's TS types do not currently expose per-call options; configure globals.
+    (Meyda as unknown as { sampleRate?: number; bufferSize?: number }).sampleRate = sampleRate;
+    (Meyda as unknown as { sampleRate?: number; bufferSize?: number }).bufferSize = bufferSize;
+
+    const meydaFeatures = Meyda.extract(
+      ['rms', 'zcr', 'spectralCentroid', 'spectralFlatness', 'amplitudeSpectrum'],
+      this.timeDomainData as unknown as Float32Array
+    ) as unknown as {
+      rms?: number;
+      zcr?: number;
+      spectralCentroid?: number;
+      spectralFlatness?: number;
+      amplitudeSpectrum?: number[] | Float32Array;
+    };
+
+    const rms = this.clamp(this.sanitizeFinite(meydaFeatures?.rms, 0), 0, 1);
+    const amplitudeSpectrumRaw = meydaFeatures?.amplitudeSpectrum ?? [];
+    const amplitudeSpectrum =
+      amplitudeSpectrumRaw instanceof Float32Array
+        ? amplitudeSpectrumRaw
+        : Float32Array.from(amplitudeSpectrumRaw);
+
+    // Primary band energy from Meyda spectrum
+    let bandEnergy = this.sanitizeFinite(
+      this.calculateSpectrumBandEnergy(amplitudeSpectrum, config.lowFreq, config.highFreq),
+      0
+    );
+
+    // Optional secondary band (snare-style)
+    if (config.secondaryLowFreq && config.secondaryHighFreq && config.secondaryWeight) {
+      const secondary = this.sanitizeFinite(
+        this.calculateSpectrumBandEnergy(amplitudeSpectrum, config.secondaryLowFreq, config.secondaryHighFreq),
+        0
+      );
+      bandEnergy = bandEnergy * (1 - config.secondaryWeight) + secondary * config.secondaryWeight;
+    }
+
+    // Spectral flux (onset strength)
+    const spectralFlux = this.sanitizeFinite(this.computeSpectralFlux(amplitudeSpectrum, previousSpectrum), 0);
+
+    // Update histories using RAW metrics (avoid feedback loops)
+    energyHistory.push(bandEnergy);
+    if (energyHistory.length > config.historySize) energyHistory.shift();
+
+    fluxHistory.push(spectralFlux);
+    if (fluxHistory.length > config.historySize) fluxHistory.shift();
+
+    rmsHistory.push(rms);
+    if (rmsHistory.length > config.historySize) rmsHistory.shift();
+
+    // Store current spectrum for next frame
+    if (!detector.previousSpectrum || detector.previousSpectrum.length !== amplitudeSpectrum.length) {
+      detector.previousSpectrum = new Float32Array(amplitudeSpectrum.length);
+    }
+    detector.previousSpectrum.set(amplitudeSpectrum);
+
+    const avgEnergy = energyHistory.reduce((a, b) => a + b, 0) / energyHistory.length;
+    const avgFlux = fluxHistory.reduce((a, b) => a + b, 0) / fluxHistory.length;
+    const avgRms = rmsHistory.reduce((a, b) => a + b, 0) / rmsHistory.length;
+    const eps = 1e-9;
+
+    // Basic silence/noise gate (prevents random triggers on tiny mic noise)
+    const minRmsByType: Record<PercussionType, number> = {
+      kick: 0.015,
+      snare: 0.012,
+      hihat: 0.008,
+      clap: 0.01,
+      tom: 0.012,
+      cymbal: 0.008,
+      custom: 0.006,
+    };
+    const minRms = minRmsByType[config.type] ?? 0.01;
+
+    // Warm up baseline before attempting detection
+    const minWarmup = Math.min(12, Math.max(6, Math.floor(config.historySize / 4)));
+    const warmedUp = energyHistory.length >= minWarmup && fluxHistory.length >= minWarmup && rmsHistory.length >= minWarmup;
+
+    const safeAvgEnergy = Math.max(this.sanitizeFinite(avgEnergy, 0), 1e-6);
+    const safeAvgFlux = Math.max(this.sanitizeFinite(avgFlux, 0), 1e-6);
+
+    // Ratios can explode when averages are tiny; clamp to keep score stable.
+    const energyRatio = this.clamp(bandEnergy / (safeAvgEnergy + eps), 0, 5);
+    const fluxRatio = this.clamp(spectralFlux / (safeAvgFlux + eps), 0, 5);
+
+    const sensitivity = this.clamp(this.sanitizeFinite(config.transientSensitivity, 0.7), 0, 1);
+
+    // Blend energy + flux; sensitivity strongly increases flux influence
+    const baseFluxWeight = config.useSpectralFlux ? 0.55 : 0.25;
+    const fluxWeight = this.clamp(baseFluxWeight + sensitivity * 0.45, 0, 0.9);
+    let score = energyRatio * (1 - fluxWeight) + fluxRatio * fluxWeight;
+
+    // Type gating using Meyda descriptors (prevents e.g. hi-hat triggering kick)
+    const match = this.percussionFeatureMatch(config.type, {
+      spectralCentroid: meydaFeatures?.spectralCentroid,
+      spectralFlatness: meydaFeatures?.spectralFlatness,
+      zcr: meydaFeatures?.zcr,
+    });
+    // Keep gating gentle, but still reduce obvious mismatches.
+    score *= 0.4 + 0.6 * match;
+
+    // Absolute onset gate: higher sensitivity makes onset requirement easier.
+    const onsetMultiplier = this.clamp(1.3 - sensitivity * 0.35, 1.0, 1.3);
+    const onsetOk = spectralFlux > safeAvgFlux * onsetMultiplier;
+
+    // Early exit: no detection attempt if silent or not warmed up.
+    if (!warmedUp || rms < minRms) {
+      return {
+        detected: false,
+        intensity: 0,
+        energy: rms,
+        averageEnergy: this.clamp(avgRms, 0, 1),
+        spectralFlux: config.useSpectralFlux ? this.clamp(fluxRatio / 5, 0, 1) : undefined,
+        timestamp: now,
+      };
+    }
+
+    const effectiveThreshold = config.threshold * this.clamp(1.15 - sensitivity * 0.25, 0.85, 1.15);
+    const newDetection =
+      onsetOk &&
+      score > effectiveThreshold &&
+      now - lastDetectionTime > config.cooldown;
+
+    const intensity = this.clamp(score, 0, 5);
+
+    if (newDetection) {
+      detector.lastDetectionTime = now;
+      detector.holdUntilTime = now + (config.holdTime || 100);
+      detector.lastIntensity = intensity;
+      detector.lastEnergy = rms;
+      detector.lastAverageEnergy = Math.max(0, Math.min(1, avgRms));
+    }
+
+    return {
+      detected: newDetection,
+      intensity,
+      energy: rms,
+      averageEnergy: Math.max(0, Math.min(1, avgRms)),
+      spectralFlux: config.useSpectralFlux ? this.clamp(fluxRatio / 5, 0, 1) : undefined,
+      timestamp: now,
+    };
+  }
+
+  /**
+   * Convenience method: detect kick drum
+   */
+  detectKick(threshold?: number, cooldown?: number): PercussionDetectionResult {
+    const id = '__kick__';
+    if (!this.percussionDetectors.has(id)) {
+      this.createPercussionDetector(id, {
+        type: 'kick',
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    } else if (threshold !== undefined || cooldown !== undefined) {
+      this.updatePercussionDetector(id, {
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    }
+    return this.detectPercussion(id);
+  }
+
+  /**
+   * Convenience method: detect snare drum
+   */
+  detectSnare(threshold?: number, cooldown?: number): PercussionDetectionResult {
+    const id = '__snare__';
+    if (!this.percussionDetectors.has(id)) {
+      this.createPercussionDetector(id, {
+        type: 'snare',
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    } else if (threshold !== undefined || cooldown !== undefined) {
+      this.updatePercussionDetector(id, {
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    }
+    return this.detectPercussion(id);
+  }
+
+  /**
+   * Convenience method: detect hi-hat
+   */
+  detectHihat(threshold?: number, cooldown?: number): PercussionDetectionResult {
+    const id = '__hihat__';
+    if (!this.percussionDetectors.has(id)) {
+      this.createPercussionDetector(id, {
+        type: 'hihat',
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    } else if (threshold !== undefined || cooldown !== undefined) {
+      this.updatePercussionDetector(id, {
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    }
+    return this.detectPercussion(id);
+  }
+
+  /**
+   * Convenience method: detect clap
+   */
+  detectClap(threshold?: number, cooldown?: number): PercussionDetectionResult {
+    const id = '__clap__';
+    if (!this.percussionDetectors.has(id)) {
+      this.createPercussionDetector(id, {
+        type: 'clap',
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    } else if (threshold !== undefined || cooldown !== undefined) {
+      this.updatePercussionDetector(id, {
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+      });
+    }
+    return this.detectPercussion(id);
+  }
+
+  /**
+   * Convenience method: detect any percussion with custom config
+   */
+  detectCustomPercussion(
+    lowFreq: number,
+    highFreq: number,
+    threshold?: number,
+    cooldown?: number,
+    useSpectralFlux?: boolean
+  ): PercussionDetectionResult {
+    const id = `__custom_${lowFreq}_${highFreq}__`;
+    if (!this.percussionDetectors.has(id)) {
+      this.createPercussionDetector(id, {
+        type: 'custom',
+        lowFreq,
+        highFreq,
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+        ...(useSpectralFlux !== undefined && { useSpectralFlux }),
+      });
+    } else {
+      this.updatePercussionDetector(id, {
+        lowFreq,
+        highFreq,
+        ...(threshold !== undefined && { threshold }),
+        ...(cooldown !== undefined && { cooldown }),
+        ...(useSpectralFlux !== undefined && { useSpectralFlux }),
+      });
+    }
+    return this.detectPercussion(id);
+  }
+
   /**
    * Disconnect and cleanup
    */
@@ -930,5 +1382,6 @@ export class FFTAnalyzer {
     this.currentNormalizationGain = 1.0;
     this.normalizationGainNode = null;
     this.compressorNode = null;
+    this.percussionDetectors.clear();
   }
 }

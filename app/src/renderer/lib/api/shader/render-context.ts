@@ -86,6 +86,13 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   // Last shader error
   private _lastShaderError: ShaderError | null = null;
 
+  // Cached blit bind group (recreated only when final texture changes)
+  private cachedBlitBindGroup: GPUBindGroup | null = null;
+  private cachedBlitTextureId: 'A' | 'B' | null = null;
+
+  // Cached Date object to avoid allocations
+  private cachedDate: Date = new Date();
+
   constructor(config: RenderContextConfig) {
     super();
     this.id = config.id;
@@ -184,6 +191,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.intermediateTextureViewA = this.intermediateTextureA.createView();
     this.intermediateTextureViewB = this.intermediateTextureB.createView();
     this.currentReadTexture = null;
+
+    // Invalidate cached blit bind group since textures changed
+    this.cachedBlitBindGroup = null;
+    this.cachedBlitTextureId = null;
   }
 
   /**
@@ -1355,13 +1366,13 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         uniformData[6] = layer.opacity;       // layerOpacity
         uniformData[7] = speed;               // speed (was _pad0)
 
-        // Date uniform - cache date to avoid repeated allocations
+        // Date uniform - reuse cached Date object to avoid allocations
         const now = Date.now();
-        const date = new Date(now);
-        uniformData[8] = date.getFullYear();
-        uniformData[9] = date.getMonth();
-        uniformData[10] = date.getDate();
-        uniformData[11] = date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
+        this.cachedDate.setTime(now);
+        uniformData[8] = this.cachedDate.getFullYear();
+        uniformData[9] = this.cachedDate.getMonth();
+        uniformData[10] = this.cachedDate.getDate();
+        uniformData[11] = this.cachedDate.getHours() * 3600 + this.cachedDate.getMinutes() * 60 + this.cachedDate.getSeconds();
 
         // Write to layer's uniform buffer (WebGPU handles synchronization internally)
         this.device!.queue.writeBuffer(layer.uniformBuffer!, 0, uniformData.buffer);
@@ -1416,15 +1427,18 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
           ? this.intermediateTextureViewA!
           : this.intermediateTextureViewB!;
 
-        // Create bind group for blit
-        const blitBindGroup = this.device!.createBindGroup({
-          label: 'blit-bind-group',
-          layout: this.blitBindGroupLayout!,
-          entries: [
-            { binding: 0, resource: finalTextureView },
-            { binding: 1, resource: this.blitSampler! },
-          ],
-        });
+        // Reuse cached bind group if texture didn't change
+        if (this.cachedBlitTextureId !== previousOutputTexture) {
+          this.cachedBlitBindGroup = this.device!.createBindGroup({
+            label: 'blit-bind-group',
+            layout: this.blitBindGroupLayout!,
+            entries: [
+              { binding: 0, resource: finalTextureView },
+              { binding: 1, resource: this.blitSampler! },
+            ],
+          });
+          this.cachedBlitTextureId = previousOutputTexture;
+        }
 
         // Render the final texture to canvas using blit pipeline
         const blitPass = commandEncoder.beginRenderPass({
@@ -1439,7 +1453,7 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         });
 
         blitPass.setPipeline(this.blitPipeline!);
-        blitPass.setBindGroup(0, blitBindGroup);
+        blitPass.setBindGroup(0, this.cachedBlitBindGroup!);
         blitPass.draw(3);
         blitPass.end();
       }

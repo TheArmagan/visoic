@@ -31,6 +31,9 @@ interface OutputWindow {
   lastRenderTime: number;
   frameCount: number;
   fps: number;
+  // Cached frame source to avoid expensive edge lookups every frame
+  cachedFrameSource: CanvasImageSource | null;
+  cachedFrameSourceNodeId: string | null;
 }
 
 class OutputRuntimeManager {
@@ -38,6 +41,14 @@ class OutputRuntimeManager {
   private sourceCanvas: HTMLCanvasElement | null = null;
   private animationFrameId: number | null = null;
   private isRunning = false;
+  private graphUnsubscribe: (() => void) | null = null;
+
+  constructor() {
+    // Subscribe to graph changes to invalidate frame source cache
+    this.graphUnsubscribe = nodeGraph.subscribe(() => {
+      this.invalidateFrameSourceCache();
+    });
+  }
 
   // ============================================
   // Lifecycle
@@ -219,6 +230,8 @@ class OutputRuntimeManager {
       lastRenderTime: 0,
       frameCount: 0,
       fps: 0,
+      cachedFrameSource: null,
+      cachedFrameSourceNodeId: null,
     });
 
     // Handle window close
@@ -292,6 +305,108 @@ class OutputRuntimeManager {
     return entry?.isOpen === true && entry.window !== null && !entry.window.closed;
   }
 
+  /**
+   * Invalidate frame source cache for all output windows
+   * Called when graph edges change
+   */
+  invalidateFrameSourceCache(): void {
+    for (const entry of this.outputWindows.values()) {
+      entry.cachedFrameSourceNodeId = null;
+      entry.cachedFrameSource = null;
+    }
+  }
+
+  /**
+   * Get frame source from a specific node (fast path - no edge lookup)
+   */
+  private getFrameSourceFromNode(sourceNodeId: string): CanvasImageSource | null {
+    const sourceNode = nodeGraph.getNode(sourceNodeId);
+    if (!sourceNode) return null;
+
+    // Check if the source is a render context node
+    if ((sourceNode.data as any).shaderType === 'render:context') {
+      return renderContextRuntime.getCanvas(sourceNodeId);
+    }
+
+    // Check if the source is a shader node
+    if (sourceNode.data.category === 'shader' && (sourceNode.data as any).shaderType !== 'render:context') {
+      const shaderCanvas = renderContextRuntime.getShaderOutputCanvas(sourceNodeId);
+      if (shaderCanvas) return shaderCanvas;
+    }
+
+    // Check outputValues
+    if (sourceNode?.data.outputValues) {
+      const frame = sourceNode.data.outputValues['output'];
+      if (frame instanceof HTMLCanvasElement ||
+        frame instanceof OffscreenCanvas ||
+        frame instanceof ImageBitmap ||
+        frame instanceof HTMLImageElement ||
+        frame instanceof HTMLVideoElement) {
+        return frame;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find the frame source for an output node (slow path - does edge lookup)
+   * Only called when cache is empty or invalid
+   */
+  private findFrameSource(outputNodeId: string): { source: CanvasImageSource; sourceNodeId: string } | null {
+    // Use graph's edge index for O(1) lookup
+    const incomingEdges = nodeGraph.getEdgesToNode(outputNodeId);
+
+    for (const edge of incomingEdges) {
+      const sourceNode = nodeGraph.getNode(edge.source);
+      if (!sourceNode) continue;
+
+      // Check if the source is a render context node
+      if ((sourceNode.data as any).shaderType === 'render:context') {
+        const canvas = renderContextRuntime.getCanvas(edge.source);
+        if (canvas) {
+          return { source: canvas, sourceNodeId: edge.source };
+        }
+      }
+
+      // Check if the source is a shader node
+      if (sourceNode.data.category === 'shader' && (sourceNode.data as any).shaderType !== 'render:context') {
+        const shaderCanvas = renderContextRuntime.getShaderOutputCanvas(edge.source);
+        if (shaderCanvas) {
+          return { source: shaderCanvas, sourceNodeId: edge.source };
+        }
+
+        // Fallback: Use RenderContext canvas
+        const renderContextEdge = nodeGraph.getEdgeToInput(edge.source, 'renderContext');
+        if (renderContextEdge) {
+          const contextNode = nodeGraph.getNode(renderContextEdge.source);
+          if (contextNode && (contextNode.data as any).shaderType === 'render:context') {
+            const canvas = renderContextRuntime.getCanvas(renderContextEdge.source);
+            if (canvas) {
+              return { source: canvas, sourceNodeId: renderContextEdge.source };
+            }
+          }
+        }
+      }
+
+      // Check other source outputs
+      if (sourceNode?.data.outputValues) {
+        const outputKey = edge.sourceHandle || 'output';
+        const frame = sourceNode.data.outputValues[outputKey];
+
+        if (frame instanceof HTMLCanvasElement ||
+          frame instanceof OffscreenCanvas ||
+          frame instanceof ImageBitmap ||
+          frame instanceof HTMLImageElement ||
+          frame instanceof HTMLVideoElement) {
+          return { source: frame, sourceNodeId: edge.source };
+        }
+      }
+    }
+
+    return null;
+  }
+
   // ============================================
   // Rendering
   // ============================================
@@ -318,6 +433,7 @@ class OutputRuntimeManager {
   /**
    * Render the source canvas to all open output windows
    * Gets frame data from connected input nodes
+   * Optimized: Uses cached frame source to avoid expensive edge lookups every frame
    */
   private renderToOutputWindows(): void {
     const now = performance.now();
@@ -335,72 +451,21 @@ class OutputRuntimeManager {
       entry.lastRenderTime = now;
 
       try {
-        // Get the output node
-        const outputNode = nodeGraph.getNode(nodeId);
-        if (!outputNode) continue;
-
-        // Get incoming edges to find connected frame source
-        const incomingEdges = nodeGraph.getEdges().filter((e) => e.target === nodeId);
-
-        // Look for a frame input
+        // Get frame source - use cache if available
         let frameSource: CanvasImageSource | null = null;
 
-        for (const edge of incomingEdges) {
-          // Accept any input handle that could be an image
-          const sourceNode = nodeGraph.getNode(edge.source);
-          if (!sourceNode) continue;
+        // Try to get from cached source node first (fast path)
+        if (entry.cachedFrameSourceNodeId) {
+          frameSource = this.getFrameSourceFromNode(entry.cachedFrameSourceNodeId);
+        }
 
-          // Check if the source is a render context node
-          if ((sourceNode.data as any).shaderType === 'render:context') {
-            // Get canvas from render context runtime
-            const canvas = renderContextRuntime.getCanvas(edge.source);
-            if (canvas) {
-              frameSource = canvas;
-              break;
-            }
-          }
-
-          // Check if the source is a shader node - get its individual output canvas
-          if (sourceNode.data.category === 'shader' && (sourceNode.data as any).shaderType !== 'render:context') {
-            // Get the shader's own output canvas (not the entire RenderContext composite)
-            const shaderCanvas = renderContextRuntime.getShaderOutputCanvas(edge.source);
-            if (shaderCanvas) {
-              frameSource = shaderCanvas;
-              break;
-            }
-
-            // Fallback: If shader doesn't have its own canvas yet, use the RenderContext canvas
-            // Find the RenderContext this shader is connected to
-            const shaderEdges = nodeGraph.getEdges().filter((e) => e.target === edge.source);
-            for (const shaderEdge of shaderEdges) {
-              if (shaderEdge.targetHandle === 'renderContext') {
-                const contextNode = nodeGraph.getNode(shaderEdge.source);
-                if (contextNode && (contextNode.data as any).shaderType === 'render:context') {
-                  const canvas = renderContextRuntime.getCanvas(shaderEdge.source);
-                  if (canvas) {
-                    frameSource = canvas;
-                    break;
-                  }
-                }
-              }
-            }
-            if (frameSource) break;
-          }
-
-          // Check other source outputs
-          if (sourceNode?.data.outputValues) {
-            // Get frame from source node output values
-            const outputKey = edge.sourceHandle || 'output';
-            const frame = sourceNode.data.outputValues[outputKey];
-
-            if (frame instanceof HTMLCanvasElement ||
-              frame instanceof OffscreenCanvas ||
-              frame instanceof ImageBitmap ||
-              frame instanceof HTMLImageElement ||
-              frame instanceof HTMLVideoElement) {
-              frameSource = frame;
-              break;
-            }
+        // If no cached source or cache miss, do full lookup (slow path)
+        // This only happens when graph changes, not every frame
+        if (!frameSource) {
+          const result = this.findFrameSource(nodeId);
+          if (result) {
+            frameSource = result.source;
+            entry.cachedFrameSourceNodeId = result.sourceNodeId;
           }
         }
 

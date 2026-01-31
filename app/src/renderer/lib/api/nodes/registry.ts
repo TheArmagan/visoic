@@ -548,6 +548,7 @@ nodeRegistry.register({
   ],
   outputs: [
     { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
+    { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
     { type: 'output', id: 'gain', label: 'Gain', dataType: 'number' },
   ],
   createDefaultData: (): AudioNodeData => ({
@@ -571,10 +572,11 @@ nodeRegistry.register({
     ],
     outputs: [
       { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
+      { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
       { type: 'output', id: 'gain', label: 'Gain', dataType: 'number' },
     ],
     inputValues: { audio: null, targetLevel: 0.5, attackTime: 0.1, releaseTime: 0.05, minGain: 0.1, maxGain: 3.0 },
-    outputValues: { audio: null, gain: 1 },
+    outputValues: { audio: null, value: 0, gain: 1 },
   }),
 });
 
@@ -615,17 +617,18 @@ nodeRegistry.register({
 nodeRegistry.register({
   type: 'audio:frequency-range',
   label: 'Frequency Range',
-  description: 'Extract custom frequency range',
+  description: 'Extract custom frequency range with preset support',
   category: 'audio',
   icon: '📊',
-  tags: ['audio', 'frequency', 'range', 'custom', 'spectrum'],
+  tags: ['audio', 'frequency', 'range', 'custom', 'spectrum', 'bass', 'mid', 'treble'],
   inputs: [
     { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
     { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 60 },
     { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 250 },
-    { type: 'input', id: 'smoothing', label: 'Smoothing', dataType: 'number', defaultValue: 0.5 },
+    { type: 'input', id: 'smoothing', label: 'Smoothing', dataType: 'number', defaultValue: 0.1 },
   ],
   outputs: [
+    { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
     { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
     { type: 'output', id: 'peak', label: 'Peak', dataType: 'number' },
   ],
@@ -634,19 +637,21 @@ nodeRegistry.register({
     category: 'audio',
     audioType: 'frequency-range',
     calculationMode: 'average',
-    smoothing: 0.5,
+    frequencyPreset: 'custom',
+    smoothing: 0.1,
     inputs: [
       { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
       { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 60 },
       { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 250 },
-      { type: 'input', id: 'smoothing', label: 'Smoothing', dataType: 'number', defaultValue: 0.5 },
+      { type: 'input', id: 'smoothing', label: 'Smoothing', dataType: 'number', defaultValue: 0.1 },
     ],
     outputs: [
+      { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
       { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
       { type: 'output', id: 'peak', label: 'Peak', dataType: 'number' },
     ],
-    inputValues: { audio: null, lowFreq: 60, highFreq: 250, smoothing: 0.5 },
-    outputValues: { value: 0, peak: 0 },
+    inputValues: { audio: null, lowFreq: 60, highFreq: 250, smoothing: 0.1 },
+    outputValues: { audio: null, value: 0, peak: 0 },
   }),
 });
 
@@ -806,6 +811,243 @@ nodeRegistry.register({
     ],
     inputValues: { audio: null, threshold: 0.5 },
     outputValues: { detected: false, intensity: 0, trigger: 0 },
+  }),
+});
+
+// ============================================
+// Advanced Percussion Detection Nodes
+// ============================================
+
+nodeRegistry.register({
+  type: 'audio:kick',
+  label: 'Kick Detector',
+  description: 'Detect kick drum / bass hits',
+  category: 'audio',
+  icon: '🦶',
+  tags: ['audio', 'kick', 'drum', 'bass', 'beat', 'percussion'],
+  inputs: [
+    { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+    { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.4 },
+    { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 100 },
+    { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 40 },
+    { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 100 },
+    { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.7 },
+  ],
+  outputs: [
+    { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+    { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+    { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+    { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+  ],
+  createDefaultData: (): AudioNodeData => ({
+    label: 'Kick Detector',
+    category: 'audio',
+    audioType: 'kick',
+    percussionConfig: {
+      type: 'kick',
+      threshold: 1.4,
+      cooldown: 100,
+      holdTime: 100,
+      lowFreq: 40,
+      highFreq: 100,
+      transientSensitivity: 0.7,
+      historySize: 43,
+      useSpectralFlux: false,
+    },
+    inputs: [
+      { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+      { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.4 },
+      { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 100 },
+      { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 100 },
+      { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 40 },
+      { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 100 },
+      { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.7 },
+    ],
+    outputs: [
+      { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+      { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+      { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+      { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+    ],
+    inputValues: { audio: null, threshold: 1.4, cooldown: 100, holdTime: 100, lowFreq: 40, highFreq: 100, sensitivity: 0.7 },
+    outputValues: { detected: false, intensity: 0, trigger: 0, energy: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'audio:snare',
+  label: 'Snare Detector',
+  description: 'Detect snare drum hits',
+  category: 'audio',
+  icon: '🪘',
+  tags: ['audio', 'snare', 'drum', 'beat', 'percussion'],
+  inputs: [
+    { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+    { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.5 },
+    { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 80 },
+    { type: 'input', id: 'lowFreq', label: 'Body Low Hz', dataType: 'number', defaultValue: 150 },
+    { type: 'input', id: 'highFreq', label: 'Body High Hz', dataType: 'number', defaultValue: 350 },
+    { type: 'input', id: 'snapLow', label: 'Snap Low Hz', dataType: 'number', defaultValue: 3000 },
+    { type: 'input', id: 'snapHigh', label: 'Snap High Hz', dataType: 'number', defaultValue: 8000 },
+    { type: 'input', id: 'snapWeight', label: 'Snap Weight', dataType: 'number', defaultValue: 0.4 },
+    { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.8 },
+  ],
+  outputs: [
+    { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+    { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+    { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+    { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+  ],
+  createDefaultData: (): AudioNodeData => ({
+    label: 'Snare Detector',
+    category: 'audio',
+    audioType: 'snare',
+    percussionConfig: {
+      type: 'snare',
+      threshold: 1.5,
+      cooldown: 80,
+      holdTime: 80,
+      lowFreq: 150,
+      highFreq: 350,
+      secondaryLowFreq: 3000,
+      secondaryHighFreq: 8000,
+      secondaryWeight: 0.4,
+      transientSensitivity: 0.8,
+      historySize: 30,
+      useSpectralFlux: true,
+    },
+    inputs: [
+      { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+      { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.5 },
+      { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 80 },
+      { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 80 },
+      { type: 'input', id: 'lowFreq', label: 'Body Low Hz', dataType: 'number', defaultValue: 150 },
+      { type: 'input', id: 'highFreq', label: 'Body High Hz', dataType: 'number', defaultValue: 350 },
+      { type: 'input', id: 'snapLow', label: 'Snap Low Hz', dataType: 'number', defaultValue: 3000 },
+      { type: 'input', id: 'snapHigh', label: 'Snap High Hz', dataType: 'number', defaultValue: 8000 },
+      { type: 'input', id: 'snapWeight', label: 'Snap Weight', dataType: 'number', defaultValue: 0.4 },
+      { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.8 },
+    ],
+    outputs: [
+      { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+      { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+      { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+      { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+    ],
+    inputValues: { audio: null, threshold: 1.5, cooldown: 80, holdTime: 80, lowFreq: 150, highFreq: 350, snapLow: 3000, snapHigh: 8000, snapWeight: 0.4, sensitivity: 0.8 },
+    outputValues: { detected: false, intensity: 0, trigger: 0, energy: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'audio:hihat',
+  label: 'Hi-Hat Detector',
+  description: 'Detect hi-hat / cymbal hits',
+  category: 'audio',
+  icon: '🔔',
+  tags: ['audio', 'hihat', 'cymbal', 'beat', 'percussion', 'hi-hat'],
+  inputs: [
+    { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+    { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.3 },
+    { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 50 },
+    { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 6000 },
+    { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 16000 },
+    { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.9 },
+  ],
+  outputs: [
+    { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+    { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+    { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+    { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+  ],
+  createDefaultData: (): AudioNodeData => ({
+    label: 'Hi-Hat Detector',
+    category: 'audio',
+    audioType: 'hihat',
+    percussionConfig: {
+      type: 'hihat',
+      threshold: 1.3,
+      cooldown: 50,
+      holdTime: 60,
+      lowFreq: 6000,
+      highFreq: 16000,
+      transientSensitivity: 0.9,
+      historySize: 20,
+      useSpectralFlux: true,
+    },
+    inputs: [
+      { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+      { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.3 },
+      { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 50 },
+      { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 60 },
+      { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 6000 },
+      { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 16000 },
+      { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.9 },
+    ],
+    outputs: [
+      { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+      { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+      { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+      { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+    ],
+    inputValues: { audio: null, threshold: 1.3, cooldown: 50, holdTime: 60, lowFreq: 6000, highFreq: 16000, sensitivity: 0.9 },
+    outputValues: { detected: false, intensity: 0, trigger: 0, energy: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'audio:clap',
+  label: 'Clap Detector',
+  description: 'Detect clap / snap sounds',
+  category: 'audio',
+  icon: '👏',
+  tags: ['audio', 'clap', 'snap', 'beat', 'percussion'],
+  inputs: [
+    { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+    { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.6 },
+    { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 100 },
+    { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 1000 },
+    { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 5000 },
+    { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.85 },
+  ],
+  outputs: [
+    { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+    { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+    { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+    { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+  ],
+  createDefaultData: (): AudioNodeData => ({
+    label: 'Clap Detector',
+    category: 'audio',
+    audioType: 'clap',
+    percussionConfig: {
+      type: 'clap',
+      threshold: 1.6,
+      cooldown: 100,
+      holdTime: 120,
+      lowFreq: 1000,
+      highFreq: 5000,
+      transientSensitivity: 0.85,
+      historySize: 25,
+      useSpectralFlux: true,
+    },
+    inputs: [
+      { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
+      { type: 'input', id: 'threshold', label: 'Threshold', dataType: 'number', defaultValue: 1.6 },
+      { type: 'input', id: 'cooldown', label: 'Cooldown (ms)', dataType: 'number', defaultValue: 100 },
+      { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 120 },
+      { type: 'input', id: 'lowFreq', label: 'Low Hz', dataType: 'number', defaultValue: 1000 },
+      { type: 'input', id: 'highFreq', label: 'High Hz', dataType: 'number', defaultValue: 5000 },
+      { type: 'input', id: 'sensitivity', label: 'Sensitivity', dataType: 'number', defaultValue: 0.85 },
+    ],
+    outputs: [
+      { type: 'output', id: 'detected', label: 'Detected', dataType: 'boolean' },
+      { type: 'output', id: 'intensity', label: 'Intensity', dataType: 'number' },
+      { type: 'output', id: 'trigger', label: 'Trigger', dataType: 'number' },
+      { type: 'output', id: 'energy', label: 'Energy', dataType: 'number' },
+    ],
+    inputValues: { audio: null, threshold: 1.6, cooldown: 100, holdTime: 120, lowFreq: 1000, highFreq: 5000, sensitivity: 0.85 },
+    outputValues: { detected: false, intensity: 0, trigger: 0, energy: 0 },
   }),
 });
 
@@ -1265,6 +1507,44 @@ nodeRegistry.register({
     inputValues: { value: 0, time: 0.1 },
     outputValues: { delayed: 0 },
     _state: { buffer: [], lastTime: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'utility:hold',
+  label: 'Hold',
+  description: 'Hold a signal/value active for a minimum duration after trigger',
+  category: 'utility',
+  icon: '⏸️',
+  tags: ['hold', 'sustain', 'duration', 'trigger', 'utility'],
+  inputs: [
+    { type: 'input', id: 'trigger', label: 'Trigger', dataType: 'boolean', defaultValue: false },
+    { type: 'input', id: 'value', label: 'Value', dataType: 'number', defaultValue: 1 },
+    { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 100 },
+  ],
+  outputs: [
+    { type: 'output', id: 'active', label: 'Active', dataType: 'boolean' },
+    { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
+  ],
+  createDefaultData: (): UtilityNodeData => ({
+    label: 'Hold',
+    category: 'utility',
+    utilityType: 'hold',
+    holdConfig: {
+      holdTime: 100,
+    },
+    inputs: [
+      { type: 'input', id: 'trigger', label: 'Trigger', dataType: 'boolean', defaultValue: false },
+      { type: 'input', id: 'value', label: 'Value', dataType: 'number', defaultValue: 1 },
+      { type: 'input', id: 'holdTime', label: 'Hold Time (ms)', dataType: 'number', defaultValue: 100 },
+    ],
+    outputs: [
+      { type: 'output', id: 'active', label: 'Active', dataType: 'boolean' },
+      { type: 'output', id: 'value', label: 'Value', dataType: 'number' },
+    ],
+    inputValues: { trigger: false, value: 1, holdTime: 100 },
+    outputValues: { active: false, value: 0 },
+    _state: { holdUntil: 0, heldValue: 0 },
   }),
 });
 
