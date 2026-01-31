@@ -515,6 +515,8 @@ nodeRegistry.register({
       smoothing: 0.8,
       minDecibels: -100,
       maxDecibels: -30,
+      gain: 1.0,
+      windowFunction: 'blackman',
     },
     inputs: [
       { type: 'input', id: 'audio', label: 'Audio', dataType: 'audio', required: true },
@@ -541,6 +543,8 @@ nodeRegistry.register({
     { type: 'input', id: 'targetLevel', label: 'Target Level', dataType: 'number', defaultValue: 0.5 },
     { type: 'input', id: 'attackTime', label: 'Attack', dataType: 'number', defaultValue: 0.1 },
     { type: 'input', id: 'releaseTime', label: 'Release', dataType: 'number', defaultValue: 0.05 },
+    { type: 'input', id: 'minGain', label: 'Min Gain', dataType: 'number', defaultValue: 0.1 },
+    { type: 'input', id: 'maxGain', label: 'Max Gain', dataType: 'number', defaultValue: 3.0 },
   ],
   outputs: [
     { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
@@ -562,12 +566,14 @@ nodeRegistry.register({
       { type: 'input', id: 'targetLevel', label: 'Target Level', dataType: 'number', defaultValue: 0.5 },
       { type: 'input', id: 'attackTime', label: 'Attack', dataType: 'number', defaultValue: 0.1 },
       { type: 'input', id: 'releaseTime', label: 'Release', dataType: 'number', defaultValue: 0.05 },
+      { type: 'input', id: 'minGain', label: 'Min Gain', dataType: 'number', defaultValue: 0.1 },
+      { type: 'input', id: 'maxGain', label: 'Max Gain', dataType: 'number', defaultValue: 3.0 },
     ],
     outputs: [
       { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
       { type: 'output', id: 'gain', label: 'Gain', dataType: 'number' },
     ],
-    inputValues: { audio: null, targetLevel: 0.5, attackTime: 0.1, releaseTime: 0.05 },
+    inputValues: { audio: null, targetLevel: 0.5, attackTime: 0.1, releaseTime: 0.05, minGain: 0.1, maxGain: 3.0 },
     outputValues: { audio: null, gain: 1 },
   }),
 });

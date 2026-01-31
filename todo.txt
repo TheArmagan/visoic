@@ -1,0 +1,3 @@
+shader test suite
+automatically try to convert and compile shader if error happens try a fix and then continiue to other shader until all shaders fixed
+this can be done trough a page on app and send the error info to console app using ipc then implement fix then reload the app window and try again

@@ -237,6 +237,36 @@ class NodeRuntimeManager {
         if (runtime?.analyzerHandle) {
           analyzer = runtime.analyzerHandle.analyzer;
           outputs.audio = runtime.analyzerId;
+
+          // Sync analyzer config from node's analyzerConfig or inputValues
+          const nodeConfig = data.analyzerConfig;
+          const currentConfig = analyzer.getConfig();
+
+          const desiredFftSize = Number(inputValues.fftSize ?? nodeConfig?.fftSize ?? 2048);
+          const desiredSmoothing = Number(inputValues.smoothing ?? nodeConfig?.smoothing ?? 0.8);
+          const desiredGain = Number(inputValues.gain ?? nodeConfig?.gain ?? 1.0);
+          const desiredMinDecibels = Number(inputValues.minDecibels ?? nodeConfig?.minDecibels ?? -100);
+          const desiredMaxDecibels = Number(inputValues.maxDecibels ?? nodeConfig?.maxDecibels ?? -30);
+          const desiredWindowFunction = (inputValues.windowFunction ?? nodeConfig?.windowFunction ?? 'blackman') as any;
+
+          // Update if any config changed
+          if (
+            currentConfig.fftSize !== desiredFftSize ||
+            currentConfig.smoothingTimeConstant !== desiredSmoothing ||
+            currentConfig.gain !== desiredGain ||
+            currentConfig.minDecibels !== desiredMinDecibels ||
+            currentConfig.maxDecibels !== desiredMaxDecibels ||
+            currentConfig.windowFunction !== desiredWindowFunction
+          ) {
+            runtime.analyzerHandle.updateConfig({
+              fftSize: desiredFftSize as any,
+              smoothingTimeConstant: desiredSmoothing,
+              gain: desiredGain,
+              minDecibels: desiredMinDecibels,
+              maxDecibels: desiredMaxDecibels,
+              windowFunction: desiredWindowFunction,
+            });
+          }
         }
       }
 
@@ -248,6 +278,36 @@ class NodeRuntimeManager {
       // Get data based on audio node type
       switch (data.audioType) {
         case 'analyzer': {
+          // Apply analyzer node's config to the connected analyzer
+          const nodeConfig = data.analyzerConfig;
+          const currentConfig = analyzer.getConfig();
+
+          const desiredFftSize = Number(inputValues.fftSize ?? nodeConfig?.fftSize ?? currentConfig.fftSize);
+          const desiredSmoothing = Number(inputValues.smoothing ?? nodeConfig?.smoothing ?? currentConfig.smoothingTimeConstant);
+          const desiredGain = Number(inputValues.gain ?? nodeConfig?.gain ?? currentConfig.gain);
+          const desiredMinDecibels = Number(inputValues.minDecibels ?? nodeConfig?.minDecibels ?? currentConfig.minDecibels);
+          const desiredMaxDecibels = Number(inputValues.maxDecibels ?? nodeConfig?.maxDecibels ?? currentConfig.maxDecibels);
+          const desiredWindowFunction = (inputValues.windowFunction ?? nodeConfig?.windowFunction ?? currentConfig.windowFunction) as any;
+
+          // Update if any config changed
+          if (
+            currentConfig.fftSize !== desiredFftSize ||
+            currentConfig.smoothingTimeConstant !== desiredSmoothing ||
+            currentConfig.gain !== desiredGain ||
+            currentConfig.minDecibels !== desiredMinDecibels ||
+            currentConfig.maxDecibels !== desiredMaxDecibels ||
+            currentConfig.windowFunction !== desiredWindowFunction
+          ) {
+            analyzer.updateConfig({
+              fftSize: desiredFftSize as any,
+              smoothingTimeConstant: desiredSmoothing,
+              gain: desiredGain,
+              minDecibels: desiredMinDecibels,
+              maxDecibels: desiredMaxDecibels,
+              windowFunction: desiredWindowFunction,
+            });
+          }
+
           const analyzerData = analyzer.getData();
           outputs.fft = analyzer.id;
           outputs.waveform = Array.from(analyzerData.timeDomainData);
@@ -257,16 +317,18 @@ class NodeRuntimeManager {
 
         case 'normalizer': {
           // Audio normalizer - pass through audio with gain adjustment
-          const targetLevel = Number(inputValues.targetLevel ?? 0.5);
-          const attackTime = Number(inputValues.attackTime ?? 0.1);
-          const releaseTime = Number(inputValues.releaseTime ?? 0.05);
+          const targetLevel = Number(inputValues.targetLevel ?? data.normalizerConfig?.targetLevel ?? 0.5);
+          const attackTime = Number(inputValues.attackTime ?? data.normalizerConfig?.attackTime ?? 0.1);
+          const releaseTime = Number(inputValues.releaseTime ?? data.normalizerConfig?.releaseTime ?? 0.05);
+          const minGain = Number(inputValues.minGain ?? data.normalizerConfig?.minGain ?? 0.1);
+          const maxGain = Number(inputValues.maxGain ?? data.normalizerConfig?.maxGain ?? 3.0);
 
           const analyzerData = analyzer.getData();
           const currentLevel = analyzerData.averageAmplitude;
 
           // Calculate gain to reach target level
           let targetGain = currentLevel > 0 ? targetLevel / currentLevel : 1;
-          targetGain = Math.max(0.1, Math.min(3.0, targetGain)); // Clamp gain
+          targetGain = Math.max(minGain, Math.min(maxGain, targetGain)); // Clamp gain with config values
 
           // Smooth gain changes
           const prevGain = Number(node.data.outputValues?.gain ?? 1);
@@ -274,7 +336,7 @@ class NodeRuntimeManager {
           const newGain = prevGain + (targetGain - prevGain) * (1 - smoothingFactor);
 
           outputs.audio = analyzer.id; // Pass through audio reference
-          outputs.gain = newGain;
+          outputs.gain = Math.max(minGain, Math.min(maxGain, newGain)); // Ensure output is clamped
           break;
         }
 

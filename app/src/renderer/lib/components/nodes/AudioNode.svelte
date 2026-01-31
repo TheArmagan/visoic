@@ -69,6 +69,15 @@
     { value: "1024", label: "1024" },
     { value: "2048", label: "2048" },
     { value: "4096", label: "4096" },
+    { value: "8192", label: "8192" },
+  ];
+
+  const windowFunctions = [
+    { value: "blackman", label: "Blackman" },
+    { value: "hann", label: "Hann" },
+    { value: "hamming", label: "Hamming" },
+    { value: "bartlett", label: "Bartlett" },
+    { value: "rectangular", label: "Rectangular" },
   ];
 
   const calculationModes = [
@@ -89,10 +98,14 @@
     { value: "brilliance", label: "Brilliance (6-20kHz)" },
   ];
 
-  function updateAnalyzerConfig(key: string, value: number) {
+  function updateAnalyzerConfig(key: string, value: number | string) {
     updateData({
       analyzerConfig: {
         ...data.analyzerConfig,
+        [key]: value,
+      },
+      inputValues: {
+        ...data.inputValues,
         [key]: value,
       },
     });
@@ -102,6 +115,10 @@
     updateData({
       normalizerConfig: {
         ...data.normalizerConfig,
+        [key]: value,
+      },
+      inputValues: {
+        ...data.inputValues,
         [key]: value,
       },
     });
@@ -143,24 +160,56 @@
     </div>
   {:else if data.audioType === "analyzer"}
     <div class="space-y-3">
-      <div>
-        <Label class="text-[10px] text-neutral-400">FFT Size</Label>
-        <Select.Root
-          type="single"
-          value={String(data.analyzerConfig?.fftSize ?? 2048)}
-          onValueChange={(v) => updateAnalyzerConfig("fftSize", parseInt(v))}
-        >
-          <Select.Trigger
-            class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <Label class="text-[10px] text-neutral-400">FFT Size</Label>
+          <Select.Root
+            type="single"
+            value={String(data.analyzerConfig?.fftSize ?? 2048)}
+            onValueChange={(v) => {
+              const val = parseInt(v);
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.analyzerConfig) node.data.analyzerConfig.fftSize = val;
+                if (node.data.inputValues) node.data.inputValues.fftSize = val;
+              }
+              updateAnalyzerConfig("fftSize", val);
+            }}
           >
-            {data.analyzerConfig?.fftSize ?? 2048}
-          </Select.Trigger>
-          <Select.Content>
-            {#each fftSizes as size}
-              <Select.Item value={size.value}>{size.label}</Select.Item>
-            {/each}
-          </Select.Content>
-        </Select.Root>
+            <Select.Trigger class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag">
+              {data.analyzerConfig?.fftSize ?? 2048}
+            </Select.Trigger>
+            <Select.Content>
+              {#each fftSizes as size}
+                <Select.Item value={size.value}>{size.label}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+        <div>
+          <Label class="text-[10px] text-neutral-400">Window</Label>
+          <Select.Root
+            type="single"
+            value={data.analyzerConfig?.windowFunction ?? "blackman"}
+            onValueChange={(v) => {
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.analyzerConfig) node.data.analyzerConfig.windowFunction = v;
+                if (node.data.inputValues) node.data.inputValues.windowFunction = v;
+              }
+              updateAnalyzerConfig("windowFunction", v);
+            }}
+          >
+            <Select.Trigger class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag">
+              {windowFunctions.find(w => w.value === (data.analyzerConfig?.windowFunction ?? "blackman"))?.label ?? "Blackman"}
+            </Select.Trigger>
+            <Select.Content>
+              {#each windowFunctions as wf}
+                <Select.Item value={wf.value}>{wf.label}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
@@ -174,12 +223,75 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.analyzerConfig) {
-              node.data.analyzerConfig.smoothing = val;
+            if (node) {
+              if (node.data.analyzerConfig) node.data.analyzerConfig.smoothing = val;
+              if (node.data.inputValues) node.data.inputValues.smoothing = val;
             }
           }}
           onchange={(e) => updateAnalyzerConfig("smoothing", parseFloat((e.target as HTMLInputElement).value))}
         />
+      </div>
+      <div>
+        <Label class="text-[10px] text-neutral-400">
+          Gain: {(data.analyzerConfig?.gain ?? 1.0).toFixed(2)}
+        </Label>
+        <RangeSlider
+          value={data.analyzerConfig?.gain ?? 1.0}
+          min={0}
+          max={3}
+          step={0.01}
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node) {
+              if (node.data.analyzerConfig) node.data.analyzerConfig.gain = val;
+              if (node.data.inputValues) node.data.inputValues.gain = val;
+            }
+          }}
+          onchange={(e) => updateAnalyzerConfig("gain", parseFloat((e.target as HTMLInputElement).value))}
+        />
+      </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Min dB: {data.analyzerConfig?.minDecibels ?? -100}
+          </Label>
+          <RangeSlider
+            value={data.analyzerConfig?.minDecibels ?? -100}
+            min={-100}
+            max={-30}
+            step={1}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.analyzerConfig) node.data.analyzerConfig.minDecibels = val;
+                if (node.data.inputValues) node.data.inputValues.minDecibels = val;
+              }
+            }}
+            onchange={(e) => updateAnalyzerConfig("minDecibels", parseFloat((e.target as HTMLInputElement).value))}
+          />
+        </div>
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Max dB: {data.analyzerConfig?.maxDecibels ?? -30}
+          </Label>
+          <RangeSlider
+            value={data.analyzerConfig?.maxDecibels ?? -30}
+            min={-60}
+            max={0}
+            step={1}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.analyzerConfig) node.data.analyzerConfig.maxDecibels = val;
+                if (node.data.inputValues) node.data.inputValues.maxDecibels = val;
+              }
+            }}
+            onchange={(e) => updateAnalyzerConfig("maxDecibels", parseFloat((e.target as HTMLInputElement).value))}
+          />
+        </div>
       </div>
       <!-- Volume meter visualization -->
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
@@ -204,16 +316,71 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.normalizerConfig) {
-              node.data.normalizerConfig.targetLevel = val;
+            if (node) {
+              if (node.data.normalizerConfig) {
+                node.data.normalizerConfig.targetLevel = val;
+              }
+              if (node.data.inputValues) {
+                node.data.inputValues.targetLevel = val;
+              }
             }
           }}
           onchange={(e) => updateNormalizerConfig("targetLevel", parseFloat((e.target as HTMLInputElement).value))}
         />
       </div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Min: {(data.normalizerConfig?.minGain ?? 0.1).toFixed(2)}
+          </Label>
+          <RangeSlider
+            value={data.normalizerConfig?.minGain ?? 0.1}
+            min={0}
+            max={1}
+            step={0.01}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.normalizerConfig) {
+                  node.data.normalizerConfig.minGain = val;
+                }
+                if (node.data.inputValues) {
+                  node.data.inputValues.minGain = val;
+                }
+              }
+            }}
+            onchange={(e) => updateNormalizerConfig("minGain", parseFloat((e.target as HTMLInputElement).value))}
+          />
+        </div>
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Max: {(data.normalizerConfig?.maxGain ?? 3.0).toFixed(1)}
+          </Label>
+          <RangeSlider
+            value={data.normalizerConfig?.maxGain ?? 3.0}
+            min={1}
+            max={10}
+            step={0.1}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node) {
+                if (node.data.normalizerConfig) {
+                  node.data.normalizerConfig.maxGain = val;
+                }
+                if (node.data.inputValues) {
+                  node.data.inputValues.maxGain = val;
+                }
+              }
+            }}
+            onchange={(e) => updateNormalizerConfig("maxGain", parseFloat((e.target as HTMLInputElement).value))}
+          />
+        </div>
+      </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Attack: {(data.normalizerConfig?.attackTime ?? 0.1).toFixed(2)}
+          Attack: {(data.normalizerConfig?.attackTime ?? 0.1).toFixed(2)}s
         </Label>
         <RangeSlider
           value={data.normalizerConfig?.attackTime ?? 0.1}
@@ -223,8 +390,13 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.normalizerConfig) {
-              node.data.normalizerConfig.attackTime = val;
+            if (node) {
+              if (node.data.normalizerConfig) {
+                node.data.normalizerConfig.attackTime = val;
+              }
+              if (node.data.inputValues) {
+                node.data.inputValues.attackTime = val;
+              }
             }
           }}
           onchange={(e) => updateNormalizerConfig("attackTime", parseFloat((e.target as HTMLInputElement).value))}
@@ -232,9 +404,7 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Release: {(data.normalizerConfig?.releaseTime ?? 0.05).toFixed(
-            2,
-          )}
+          Release: {(data.normalizerConfig?.releaseTime ?? 0.05).toFixed(2)}s
         </Label>
         <RangeSlider
           value={data.normalizerConfig?.releaseTime ?? 0.05}
@@ -244,12 +414,24 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.normalizerConfig) {
-              node.data.normalizerConfig.releaseTime = val;
+            if (node) {
+              if (node.data.normalizerConfig) {
+                node.data.normalizerConfig.releaseTime = val;
+              }
+              if (node.data.inputValues) {
+                node.data.inputValues.releaseTime = val;
+              }
             }
           }}
           onchange={(e) => updateNormalizerConfig("releaseTime", parseFloat((e.target as HTMLInputElement).value))}
         />
+      </div>
+      <!-- Gain output display -->
+      <div class="text-center border-t border-neutral-700 pt-2">
+        <span class="text-[10px] text-neutral-500">Gain:</span>
+        <span class="text-xs font-mono text-green-400 ml-1">
+          {((outputValues.value?.gain as number) ?? 1).toFixed(3)}
+        </span>
       </div>
     </div>
   {:else if data.audioType === "band"}

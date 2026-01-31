@@ -352,6 +352,7 @@ export interface AudioNodeData extends BaseNodeData {
     minDecibels: number;
     maxDecibels: number;
     gain?: number;
+    windowFunction?: 'blackman' | 'hann' | 'hamming' | 'bartlett' | 'rectangular';
   };
   /** Normalizer config */
   normalizerConfig?: {
