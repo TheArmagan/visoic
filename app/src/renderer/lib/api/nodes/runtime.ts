@@ -17,6 +17,7 @@ interface AudioNodeRuntime {
   nodeId: string;
   analyzerId?: string;
   analyzerHandle?: AnalyzerHandle;
+  initializing?: boolean;
 }
 
 class NodeRuntimeManager {
@@ -128,6 +129,15 @@ class NodeRuntimeManager {
     const data = node.data as AudioNodeData;
     const deviceId = data.deviceId || 'default';
 
+    // Prevent duplicate creation
+    if (this.audioRuntimes.has(node.id)) return;
+
+    // Mark as initializing
+    this.audioRuntimes.set(node.id, {
+      nodeId: node.id,
+      initializing: true
+    });
+
     // Ensure fftSize is a valid FFTSize type
     const fftSizeValue = data.analyzerConfig?.fftSize;
     const validFftSizes: FFTSize[] = [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768];
@@ -145,10 +155,19 @@ class NodeRuntimeManager {
         label: `Node: ${node.id}`,
       });
 
+      // Check if node was removed or re-initialized while we were waiting
+      const currentRuntime = this.audioRuntimes.get(node.id);
+      if (!currentRuntime || !currentRuntime.initializing) {
+        // Obsolete request
+        handle.destroy();
+        return;
+      }
+
       this.audioRuntimes.set(node.id, {
         nodeId: node.id,
         analyzerId: handle.id,
         analyzerHandle: handle,
+        initializing: false,
       });
 
       // Update node output to reference this analyzer
@@ -157,8 +176,11 @@ class NodeRuntimeManager {
           audio: handle.id, // Pass analyzer ID as audio reference
         },
       });
+
+      console.log(`[NodeRuntime] Created audio runtime for node ${node.id} on device ${deviceId}`);
     } catch (error) {
-      console.error(`Failed to create audio runtime for node ${node.id}:`, error);
+      console.error(`[NodeRuntime] Failed to create audio runtime for node ${node.id}:`, error);
+      this.audioRuntimes.delete(node.id); // Clear pending entry
     }
   }
 
@@ -172,6 +194,7 @@ class NodeRuntimeManager {
 
   private updateAudioNodeOutputs(): void {
     const nodes = nodeGraph.getNodes();
+    const edges = nodeGraph.getEdges();
 
     for (const node of nodes) {
       if (node.data.category !== 'audio') continue;
@@ -179,13 +202,33 @@ class NodeRuntimeManager {
       const data = node.data as AudioNodeData;
       const outputs: Record<string, unknown> = {};
 
-      // Get analyzer from connected audio input or own runtime
-      let analyzer: FFTAnalyzer | undefined;
-      const audioInput = node.data.inputValues?.audio;
+      // Get actual input values from edges (not just stored inputValues)
+      const inputValues: Record<string, unknown> = { ...node.data.inputValues };
 
+      // Override with connected edge values
+      for (const edge of edges) {
+        if (edge.target === node.id && edge.targetHandle) {
+          const sourceNode = nodeGraph.getNode(edge.source);
+          if (sourceNode?.data.outputValues && edge.sourceHandle) {
+            inputValues[edge.targetHandle] = sourceNode.data.outputValues[edge.sourceHandle];
+          }
+        }
+      }
+
+      // Get analyzer from connected audio input, fft input, or own runtime
+      let analyzer: FFTAnalyzer | undefined;
+      const audioInput = inputValues.audio;
+      const fftInput = inputValues.fft;
+
+      // Try audio input first
       if (typeof audioInput === 'string') {
         // It's an analyzer ID
         analyzer = audioManager.getAnalyzer(audioInput);
+      }
+
+      // Try fft input if no audio input (for FFT Band nodes)
+      if (!analyzer && typeof fftInput === 'string') {
+        analyzer = audioManager.getAnalyzer(fftInput);
       }
 
       // If this is a device node, use its own runtime
@@ -212,9 +255,32 @@ class NodeRuntimeManager {
           break;
         }
 
+        case 'normalizer': {
+          // Audio normalizer - pass through audio with gain adjustment
+          const targetLevel = Number(inputValues.targetLevel ?? 0.5);
+          const attackTime = Number(inputValues.attackTime ?? 0.1);
+          const releaseTime = Number(inputValues.releaseTime ?? 0.05);
+
+          const analyzerData = analyzer.getData();
+          const currentLevel = analyzerData.averageAmplitude;
+
+          // Calculate gain to reach target level
+          let targetGain = currentLevel > 0 ? targetLevel / currentLevel : 1;
+          targetGain = Math.max(0.1, Math.min(3.0, targetGain)); // Clamp gain
+
+          // Smooth gain changes
+          const prevGain = Number(node.data.outputValues?.gain ?? 1);
+          const smoothingFactor = currentLevel > prevGain * targetLevel ? attackTime : releaseTime;
+          const newGain = prevGain + (targetGain - prevGain) * (1 - smoothingFactor);
+
+          outputs.audio = analyzer.id; // Pass through audio reference
+          outputs.gain = newGain;
+          break;
+        }
+
         case 'frequency-range': {
-          const lowFreq = Number(node.data.inputValues?.lowFreq ?? 60);
-          const highFreq = Number(node.data.inputValues?.highFreq ?? 250);
+          const lowFreq = Number(inputValues.lowFreq ?? 60);
+          const highFreq = Number(inputValues.highFreq ?? 250);
           const mode = (data.calculationMode || 'average') as 'average' | 'peak' | 'rms' | 'sum' | 'weighted';
 
           outputs.value = analyzer.getFrequencyRangeAdvanced(lowFreq, highFreq, mode);
@@ -249,7 +315,7 @@ class NodeRuntimeManager {
         }
 
         case 'beat': {
-          const threshold = Number(node.data.inputValues?.threshold ?? 0.5);
+          const threshold = Number(inputValues.threshold ?? 0.5);
           const beatData = analyzer.detectBeat(threshold);
           outputs.detected = beatData.detected;
           outputs.intensity = beatData.intensity;
@@ -257,23 +323,36 @@ class NodeRuntimeManager {
           break;
         }
 
-        // Preset frequency bands
+        // Preset frequency bands OR custom range from FFT Band node
         case 'band': {
-          const band = data.frequencyBand;
-          const bandRanges: Record<string, [number, number]> = {
-            subBass: [20, 60],
-            bass: [60, 250],
-            lowMid: [250, 500],
-            mid: [500, 2000],
-            upperMid: [2000, 4000],
-            presence: [4000, 6000],
-            brilliance: [6000, 20000],
-          };
+          // Check if using custom low/high freq (FFT Band node)
+          const lowFreq = inputValues.lowFreq;
+          const highFreq = inputValues.highFreq;
 
-          if (band && bandRanges[band]) {
-            const [low, high] = bandRanges[band];
+          if (lowFreq !== undefined && highFreq !== undefined) {
+            // Custom frequency range (FFT Band node)
+            const low = Number(lowFreq);
+            const high = Number(highFreq);
             outputs.value = analyzer.getFrequencyRangeAdvanced(low, high, 'average');
             outputs.peak = analyzer.getFrequencyRangeAdvanced(low, high, 'peak');
+          } else {
+            // Preset frequency band
+            const band = data.frequencyBand;
+            const bandRanges: Record<string, [number, number]> = {
+              subBass: [20, 60],
+              bass: [60, 250],
+              lowMid: [250, 500],
+              mid: [500, 2000],
+              upperMid: [2000, 4000],
+              presence: [4000, 6000],
+              brilliance: [6000, 20000],
+            };
+
+            if (band && bandRanges[band]) {
+              const [low, high] = bandRanges[band];
+              outputs.value = analyzer.getFrequencyRangeAdvanced(low, high, 'average');
+              outputs.peak = analyzer.getFrequencyRangeAdvanced(low, high, 'peak');
+            }
           }
           break;
         }

@@ -10,6 +10,7 @@
     position?: Position;
     showLabel?: boolean;
     class?: string;
+    onHandleDoubleClick?: (handle: HandleDefinition, event: MouseEvent) => void;
   }
 
   let {
@@ -18,9 +19,17 @@
     position = type === "source" ? Position.Right : Position.Left,
     showLabel = true,
     class: className,
+    onHandleDoubleClick,
   }: Props = $props();
 
   const typeInfo = $derived(DATA_TYPE_INFO[handle.dataType]);
+
+  function handleDoubleClick(event: MouseEvent) {
+    if (type === "source" && onHandleDoubleClick) {
+      event.stopPropagation();
+      onHandleDoubleClick(handle, event);
+    }
+  }
 </script>
 
 <div
@@ -30,13 +39,16 @@
     className,
   )}
 >
-  <Handle
-    {type}
-    {position}
-    id={handle.id}
-    class="!w-3 !h-3 !rounded-full !border-2 !border-neutral-800 !transition-all hover:!scale-125"
-    style="background-color: {typeInfo.color};"
-  />
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div ondblclick={handleDoubleClick}>
+    <Handle
+      {type}
+      {position}
+      id={handle.id}
+      class="!w-3 !h-3 !rounded-full !border-2 !border-neutral-800 !transition-all hover:!scale-125"
+      style="background-color: {typeInfo.color};"
+    />
+  </div>
 
   {#if showLabel}
     <span

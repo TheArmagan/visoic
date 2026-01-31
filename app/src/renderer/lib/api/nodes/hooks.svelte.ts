@@ -87,6 +87,78 @@ export function useGraphState(): {
 }
 
 // ============================================
+// Per-Node Data Hook
+// ============================================
+
+/**
+ * Subscribe to data changes for a specific node.
+ * This is more efficient than useNodes() because it only triggers
+ * when the specific node's data changes, not when any node changes.
+ * 
+ * @param nodeId - The ID of the node to watch
+ * @returns Reactive node data that updates when the node changes
+ */
+export function useNodeData<T extends AnyNodeData>(nodeId: string): {
+  data: T | null;
+  update: (updates: Partial<T>) => void;
+  updateSilent: (updates: Partial<T>) => void;
+} {
+  const initialNode = nodeGraph.getNode(nodeId);
+  let data = $state<T | null>(initialNode?.data as T | null);
+
+  // Subscribe to this specific node's changes
+  const unsubscribe = nodeGraph.subscribeToNode(nodeId, (newData) => {
+    data = newData as T;
+  });
+
+  onDestroy(unsubscribe);
+
+  return {
+    get data() {
+      return data;
+    },
+    update: (updates: Partial<T>) => {
+      nodeGraph.updateNodeData(nodeId, updates as Partial<AnyNodeData>);
+    },
+    updateSilent: (updates: Partial<T>) => {
+      nodeGraph.updateNodeDataSilent(nodeId, updates as Partial<AnyNodeData>);
+    },
+  };
+}
+
+/**
+ * Watch a specific property of a node's data.
+ * Even more granular than useNodeData - only updates when that specific property changes.
+ * 
+ * @param nodeId - The ID of the node to watch
+ * @param property - The property key to watch
+ * @returns The current value of the property
+ */
+export function useNodeProperty<T extends AnyNodeData, K extends keyof T>(
+  nodeId: string,
+  property: K
+): { value: T[K] | undefined } {
+  const initialNode = nodeGraph.getNode(nodeId);
+  let value = $state<T[K] | undefined>(
+    initialNode?.data ? (initialNode.data as T)[property] : undefined
+  );
+
+  const unsubscribe = nodeGraph.subscribeToNode(nodeId, (newData) => {
+    const newValue = (newData as T)[property];
+    // Always update - let Svelte handle the reactivity
+    value = newValue;
+  });
+
+  onDestroy(unsubscribe);
+
+  return {
+    get value() {
+      return value;
+    },
+  };
+}
+
+// ============================================
 // Node Registry Hooks
 // ============================================
 

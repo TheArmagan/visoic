@@ -3,10 +3,10 @@
   import type { ShaderNodeData } from "$lib/api/nodes/types";
   import { nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
-  import { Slider } from "$lib/components/ui/slider";
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import * as Select from "$lib/components/ui/select";
+  import { RangeSlider } from "$lib/components/ui/range-slider";
 
   interface Props {
     id: string;
@@ -16,11 +16,14 @@
 
   let props: Props = $props();
 
+  // Use props.data directly - SvelteFlow handles reactivity
+  const data = $derived(props.data);
+
   const { updateNodeData } = useSvelteFlow();
 
   function updateInputValue(inputId: string, value: unknown) {
     const newInputValues = {
-      ...props.data.inputValues,
+      ...data.inputValues,
       [inputId]: value,
     };
     // Update nodeGraph for runtime (silent - no listener trigger for perf)
@@ -38,7 +41,7 @@
 
   // Filter inputs to show only controllable ones (not images, not renderContext)
   const controllableInputs = $derived(
-    props.data.inputs.filter(
+    data.inputs.filter(
       (i) => i.dataType !== "image" && i.dataType !== "renderContext",
     ),
   );
@@ -61,7 +64,7 @@
       >
         Shader
       </span>
-      {#if props.data.enabled === false}
+      {#if data.enabled === false}
         <span class="text-[9px] text-yellow-400">OFF</span>
       {/if}
     </div>
@@ -73,32 +76,37 @@
       <div class="flex items-center justify-between mb-1">
         <Label class="text-[10px] text-neutral-400">Opacity</Label>
         <span class="text-[9px] font-mono text-neutral-500">
-          {((props.data.opacity ?? 1) * 100).toFixed(0)}%
+          {((data.opacity ?? 1) * 100).toFixed(0)}%
         </span>
       </div>
-      <Slider
-        type="single"
-        value={props.data.opacity ?? 1}
+      <RangeSlider
+        value={data.opacity ?? 1}
         min={0}
         max={1}
         step={0.01}
-        onValueChange={(v) => updateLayerSetting("opacity", v)}
-        class="nodrag"
-      />
+        oninput={(e) => {
+          const val = parseFloat((e.target as HTMLInputElement).value);
+          const node = nodeGraph.getNode(props.id);
+          if (node) {
+            node.data.opacity = val;
+          }
+        }}
+        onchange={(e) => updateLayerSetting("opacity", parseFloat((e.target as HTMLInputElement).value))}
+        />
 
       <div class="flex items-center gap-2 mt-2">
         <div class="flex-1">
           <Label class="text-[10px] text-neutral-400 block mb-1">Blend</Label>
           <Select.Root
             type="single"
-            value={props.data.blendMode ?? "normal"}
+            value={data.blendMode ?? "normal"}
             onValueChange={(v) => updateLayerSetting("blendMode", v)}
           >
             <Select.Trigger
               class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
             >
               {blendModes.find(
-                (m) => m.value === (props.data.blendMode ?? "normal"),
+                (m) => m.value === (data.blendMode ?? "normal"),
               )?.label ?? "Normal"}
             </Select.Trigger>
             <Select.Content>
@@ -112,7 +120,7 @@
           <label class="flex items-center gap-1 cursor-pointer nodrag">
             <input
               type="checkbox"
-              checked={props.data.enabled !== false}
+              checked={data.enabled !== false}
               onchange={(e) =>
                 updateLayerSetting(
                   "enabled",
@@ -128,7 +136,7 @@
 
     <!-- Uniform Controls -->
     {#each controllableInputs as input (input.id)}
-      {@const value = props.data.inputValues[input.id]}
+      {@const value = data.inputValues[input.id]}
 
       {#if input.dataType === "number"}
         <div>
@@ -138,15 +146,20 @@
               {typeof value === "number" ? value.toFixed(3) : value}
             </span>
           </div>
-          <Slider
-            type="single"
+          <RangeSlider
             value={(value as number) ?? (input.defaultValue as number) ?? 0}
             min={input.min ?? 0}
             max={input.max ?? 1}
             step={(input.max ?? 1) - (input.min ?? 0) > 10 ? 1 : 0.001}
-            onValueChange={(v) => updateInputValue(input.id, v)}
-            class="nodrag"
-          />
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.inputValues) {
+                node.data.inputValues[input.id] = val;
+              }
+            }}
+            onchange={(e) => updateInputValue(input.id, parseFloat((e.target as HTMLInputElement).value))}
+            />
         </div>
       {:else if input.dataType === "color"}
         <div>
@@ -226,10 +239,12 @@
       {/if}
     {/each}
 
-    {#if props.data.metadata?.description}
+    {#if data.metadata?.description}
       <p class="text-[9px] text-neutral-500 italic mt-2">
-        {props.data.metadata.description}
+        {data.metadata.description}
       </p>
     {/if}
   </div>
 </BaseNode>
+
+

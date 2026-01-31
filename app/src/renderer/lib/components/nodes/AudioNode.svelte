@@ -1,13 +1,13 @@
 <script lang="ts">
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { AudioNodeData } from "$lib/api/nodes/types";
-  import { nodeRuntime } from "$lib/api/nodes";
+  import { nodeGraph, nodeRuntime, useNodeProperty } from "$lib/api/nodes";
   import { onMount } from "svelte";
   import BaseNode from "./BaseNode.svelte";
   import * as Select from "$lib/components/ui/select";
   import { Input } from "$lib/components/ui/input";
-  import { Slider } from "$lib/components/ui/slider";
   import { Label } from "$lib/components/ui/label";
+  import { RangeSlider } from "$lib/components/ui/range-slider";
 
   interface Props {
     id: string;
@@ -17,7 +17,34 @@
 
   let props: Props = $props();
 
+  // Use props.data for config values (user editable)
+  const data = $derived(props.data);
+
+  // Subscribe to outputValues changes from nodeGraph (runtime computed values)
+  const outputValues = useNodeProperty<AudioNodeData, "outputValues">(props.id, "outputValues");
+
   const { updateNodeData } = useSvelteFlow();
+
+  // Helper to update both nodeGraph (for runtime) and SvelteFlow (for UI)
+  function updateData(updates: Partial<AudioNodeData>) {
+    // Update nodeGraph directly (no listener notification to avoid loop)
+    const node = nodeGraph.getNode(props.id);
+    if (node) {
+      // Deep merge for nested objects like inputValues
+      for (const [key, value] of Object.entries(updates)) {
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+          (node.data as Record<string, unknown>)[key] = {
+            ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
+            ...value,
+          };
+        } else {
+          (node.data as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
+    // Update SvelteFlow for UI
+    updateNodeData(props.id, updates);
+  }
 
   // Fetch device list from audio API
   let devices = $state<{ value: string; label: string }[]>([
@@ -63,18 +90,18 @@
   ];
 
   function updateAnalyzerConfig(key: string, value: number) {
-    updateNodeData(props.id, {
+    updateData({
       analyzerConfig: {
-        ...props.data.analyzerConfig,
+        ...data.analyzerConfig,
         [key]: value,
       },
     });
   }
 
   function updateNormalizerConfig(key: string, value: number) {
-    updateNodeData(props.id, {
+    updateData({
       normalizerConfig: {
-        ...props.data.normalizerConfig,
+        ...data.normalizerConfig,
         [key]: value,
       },
     });
@@ -82,21 +109,21 @@
 </script>
 
 <BaseNode {...props}>
-  {#if props.data.audioType === "device"}
+  {#if data.audioType === "device"}
     <div class="space-y-2">
       <Label class="text-[10px] text-neutral-400">Device</Label>
       <Select.Root
         type="single"
-        value={props.data.deviceId ?? "default"}
+        value={data.deviceId ?? "default"}
         onValueChange={(v) => {
-          updateNodeData(props.id, { deviceId: v });
+          updateData({ deviceId: v });
           nodeRuntime.setNodeDevice(props.id, v);
         }}
       >
         <Select.Trigger
           class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
         >
-          {devices.find((d) => d.value === props.data.deviceId)?.label ??
+          {devices.find((d) => d.value === data.deviceId)?.label ??
             "Select Device"}
         </Select.Trigger>
         <Select.Content>
@@ -109,24 +136,24 @@
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((props.data.outputValues?.volume as number) ?? 0) *
+          style="width: {((outputValues.value?.volume as number) ?? 0) *
             100}%"
         ></div>
       </div>
     </div>
-  {:else if props.data.audioType === "analyzer"}
+  {:else if data.audioType === "analyzer"}
     <div class="space-y-3">
       <div>
         <Label class="text-[10px] text-neutral-400">FFT Size</Label>
         <Select.Root
           type="single"
-          value={String(props.data.analyzerConfig?.fftSize ?? 2048)}
+          value={String(data.analyzerConfig?.fftSize ?? 2048)}
           onValueChange={(v) => updateAnalyzerConfig("fftSize", parseInt(v))}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
-            {props.data.analyzerConfig?.fftSize ?? 2048}
+            {data.analyzerConfig?.fftSize ?? 2048}
           </Select.Trigger>
           <Select.Content>
             {#each fftSizes as size}
@@ -137,86 +164,106 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Smoothing: {(props.data.analyzerConfig?.smoothing ?? 0.8).toFixed(2)}
+          Smoothing: {(data.analyzerConfig?.smoothing ?? 0.8).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.analyzerConfig?.smoothing ?? 0.8}
+        <RangeSlider
+          value={data.analyzerConfig?.smoothing ?? 0.8}
           min={0}
           max={1}
           step={0.01}
-          onValueChange={(v) => updateAnalyzerConfig("smoothing", v)}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.analyzerConfig) {
+              node.data.analyzerConfig.smoothing = val;
+            }
+          }}
+          onchange={(e) => updateAnalyzerConfig("smoothing", parseFloat((e.target as HTMLInputElement).value))}
         />
       </div>
       <!-- Volume meter visualization -->
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((props.data.outputValues?.volume as number) ?? 0) *
+          style="width: {((outputValues.value?.volume as number) ?? 0) *
             100}%"
         ></div>
       </div>
     </div>
-  {:else if props.data.audioType === "normalizer"}
+  {:else if data.audioType === "normalizer"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Target: {(props.data.normalizerConfig?.targetLevel ?? 0.5).toFixed(2)}
+          Target: {(data.normalizerConfig?.targetLevel ?? 0.5).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.normalizerConfig?.targetLevel ?? 0.5}
+        <RangeSlider
+          value={data.normalizerConfig?.targetLevel ?? 0.5}
           min={0}
           max={1}
           step={0.01}
-          onValueChange={(v) => updateNormalizerConfig("targetLevel", v)}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.normalizerConfig) {
+              node.data.normalizerConfig.targetLevel = val;
+            }
+          }}
+          onchange={(e) => updateNormalizerConfig("targetLevel", parseFloat((e.target as HTMLInputElement).value))}
         />
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Attack: {(props.data.normalizerConfig?.attackTime ?? 0.1).toFixed(2)}
+          Attack: {(data.normalizerConfig?.attackTime ?? 0.1).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.normalizerConfig?.attackTime ?? 0.1}
+        <RangeSlider
+          value={data.normalizerConfig?.attackTime ?? 0.1}
           min={0.01}
           max={1}
           step={0.01}
-          onValueChange={(v) => updateNormalizerConfig("attackTime", v)}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.normalizerConfig) {
+              node.data.normalizerConfig.attackTime = val;
+            }
+          }}
+          onchange={(e) => updateNormalizerConfig("attackTime", parseFloat((e.target as HTMLInputElement).value))}
         />
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Release: {(props.data.normalizerConfig?.releaseTime ?? 0.05).toFixed(
+          Release: {(data.normalizerConfig?.releaseTime ?? 0.05).toFixed(
             2,
           )}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.normalizerConfig?.releaseTime ?? 0.05}
+        <RangeSlider
+          value={data.normalizerConfig?.releaseTime ?? 0.05}
           min={0.01}
           max={1}
           step={0.01}
-          onValueChange={(v) => updateNormalizerConfig("releaseTime", v)}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.normalizerConfig) {
+              node.data.normalizerConfig.releaseTime = val;
+            }
+          }}
+          onchange={(e) => updateNormalizerConfig("releaseTime", parseFloat((e.target as HTMLInputElement).value))}
         />
       </div>
     </div>
-  {:else if props.data.audioType === "band"}
+  {:else if data.audioType === "band"}
     <div class="space-y-2">
       <div class="grid grid-cols-2 gap-2">
         <div>
           <Label class="text-[10px] text-neutral-400">Low Hz</Label>
           <Input
             type="number"
-            value={props.data.inputValues?.lowFreq ?? 20}
+            value={data.inputValues?.lowFreq ?? 20}
             oninput={(e) =>
-              updateNodeData(props.id, {
+              updateData({
                 inputValues: {
-                  ...props.data.inputValues,
+                  ...data.inputValues,
                   lowFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 20,
                 },
@@ -228,11 +275,11 @@
           <Label class="text-[10px] text-neutral-400">High Hz</Label>
           <Input
             type="number"
-            value={props.data.inputValues?.highFreq ?? 200}
+            value={data.inputValues?.highFreq ?? 200}
             oninput={(e) =>
-              updateNodeData(props.id, {
+              updateData({
                 inputValues: {
-                  ...props.data.inputValues,
+                  ...data.inputValues,
                   highFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 200,
                 },
@@ -245,26 +292,26 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((props.data.outputValues?.value as number) ?? 0) *
+          style="width: {((outputValues.value?.value as number) ?? 0) *
             100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((props.data.outputValues?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
-  {:else if props.data.audioType === "frequency-range"}
+  {:else if data.audioType === "frequency-range"}
     <div class="space-y-2">
       <div class="grid grid-cols-2 gap-2">
         <div>
           <Label class="text-[10px] text-neutral-400">Low Hz</Label>
           <Input
             type="number"
-            value={props.data.inputValues?.lowFreq ?? 60}
+            value={data.inputValues?.lowFreq ?? 60}
             oninput={(e) =>
-              updateNodeData(props.id, {
+              updateData({
                 inputValues: {
-                  ...props.data.inputValues,
+                  ...data.inputValues,
                   lowFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 60,
                 },
@@ -276,11 +323,11 @@
           <Label class="text-[10px] text-neutral-400">High Hz</Label>
           <Input
             type="number"
-            value={props.data.inputValues?.highFreq ?? 250}
+            value={data.inputValues?.highFreq ?? 250}
             oninput={(e) =>
-              updateNodeData(props.id, {
+              updateData({
                 inputValues: {
-                  ...props.data.inputValues,
+                  ...data.inputValues,
                   highFreq:
                     parseFloat((e.target as HTMLInputElement).value) || 250,
                 },
@@ -293,15 +340,15 @@
         <Label class="text-[10px] text-neutral-400">Mode</Label>
         <Select.Root
           type="single"
-          value={props.data.calculationMode ?? "average"}
+          value={data.calculationMode ?? "average"}
           onValueChange={(v) =>
-            updateNodeData(props.id, { calculationMode: v })}
+            updateData({ calculationMode: v })}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
             {calculationModes.find(
-              (m) => m.value === props.data.calculationMode,
+              (m) => m.value === data.calculationMode,
             )?.label ?? "Average"}
           </Select.Trigger>
           <Select.Content>
@@ -313,63 +360,73 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Smoothing: {(props.data.smoothing ?? 0).toFixed(2)}
+          Smoothing: {(data.smoothing ?? 0).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.smoothing ?? 0}
+        <RangeSlider
+          value={data.smoothing ?? 0}
           min={0}
           max={0.99}
           step={0.01}
-          onValueChange={(v) => updateNodeData(props.id, { smoothing: v })}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node) {
+              node.data.smoothing = val;
+            }
+          }}
+          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-orange-500 transition-all"
-          style="width: {((props.data.outputValues?.value as number) ?? 0) *
+          style="width: {((outputValues.value?.value as number) ?? 0) *
             100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((props.data.outputValues?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
-  {:else if props.data.audioType === "amplitude" || props.data.audioType === "rms"}
+  {:else if data.audioType === "amplitude" || data.audioType === "rms"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Smoothing: {(props.data.smoothing ?? 0).toFixed(2)}
+          Smoothing: {(data.smoothing ?? 0).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.smoothing ?? 0}
+        <RangeSlider
+          value={data.smoothing ?? 0}
           min={0}
           max={0.99}
           step={0.01}
-          onValueChange={(v) => updateNodeData(props.id, { smoothing: v })}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node) {
+              node.data.smoothing = val;
+            }
+          }}
+          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-green-500 transition-all"
-          style="width: {((props.data.outputValues?.value as number) ?? 0) *
+          style="width: {((outputValues.value?.value as number) ?? 0) *
             100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((props.data.outputValues?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
-  {:else if props.data.audioType === "peak"}
+  {:else if data.audioType === "peak"}
     <div class="space-y-2">
       <div class="text-[10px] text-neutral-400">
         Peak Frequency: <span class="text-white font-mono">
-          {((props.data.outputValues?.frequency as number) ?? 0).toFixed(0)} Hz
+          {((outputValues.value?.frequency as number) ?? 0).toFixed(0)} Hz
         </span>
       </div>
       <!-- Peak visualization -->
@@ -377,100 +434,113 @@
         <div
           class="h-full bg-purple-500 transition-all"
           style="width: {Math.min(
-            ((props.data.outputValues?.value as number) ?? 0) * 100,
+            ((outputValues.value?.value as number) ?? 0) * 100,
             100,
           )}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Level: {((props.data.outputValues?.value as number) ?? 0).toFixed(3)}
+        Level: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
-  {:else if props.data.audioType === "bpm"}
+  {:else if data.audioType === "bpm"}
     <div class="space-y-2">
       <div class="text-center">
         <span class="text-2xl font-bold text-orange-400">
-          {((props.data.outputValues?.bpm as number) ?? 0).toFixed(0)}
+          {((outputValues.value?.bpm as number) ?? 0).toFixed(0)}
         </span>
         <span class="text-xs text-neutral-500"> BPM</span>
       </div>
       <div class="text-[10px] text-neutral-400 text-center">
         Confidence: {(
-          ((props.data.outputValues?.confidence as number) ?? 0) * 100
+          ((outputValues.value?.confidence as number) ?? 0) * 100
         ).toFixed(0)}%
       </div>
     </div>
-  {:else if props.data.audioType === "beat"}
+  {:else if data.audioType === "beat"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Threshold: {Number(props.data.inputValues?.threshold ?? 0.5).toFixed(
+          Threshold: {Number(data.inputValues?.threshold ?? 0.5).toFixed(
             2,
           )}
         </Label>
-        <Slider
-          type="single"
-          value={(props.data.inputValues?.threshold as number) ?? 0.5}
+        <RangeSlider
+          value={(data.inputValues?.threshold as number) ?? 0.5}
           min={0}
           max={1}
           step={0.01}
-          onValueChange={(v) =>
-            updateNodeData(props.id, {
-              inputValues: { ...props.data.inputValues, threshold: v },
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.inputValues) {
+              node.data.inputValues.threshold = val;
+            }
+          }}
+          onchange={(e) =>
+            updateData({
+              inputValues: { ...data.inputValues, threshold: parseFloat((e.target as HTMLInputElement).value) },
             })}
-          class="nodrag"
         />
       </div>
       <!-- Beat indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-red-500={props.data.outputValues?.detected}
-        class:bg-neutral-800={!props.data.outputValues?.detected}
+        class:bg-red-500={outputValues.value?.detected}
+        class:bg-neutral-800={!outputValues.value?.detected}
       >
         <span class="text-xs font-bold">
-          {props.data.outputValues?.detected ? "BEAT!" : "—"}
+          {outputValues.value?.detected ? "BEAT!" : "—"}
         </span>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
         Intensity: {(
-          (props.data.outputValues?.intensity as number) ?? 0
+          (outputValues.value?.intensity as number) ?? 0
         ).toFixed(3)}
       </span>
     </div>
   {:else}
     <!-- Default preset bands (bass, mid, treble, etc.) -->
     <div class="space-y-2">
-      {#if props.data.frequencyBand}
+      {#if data.frequencyBand}
         <Label class="text-[10px] text-neutral-400">
-          {frequencyBands.find((b) => b.value === props.data.frequencyBand)
+          {frequencyBands.find((b) => b.value === data.frequencyBand)
             ?.label}
         </Label>
       {/if}
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Smoothing: {(props.data.smoothing ?? 0).toFixed(2)}
+          Smoothing: {(data.smoothing ?? 0).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.smoothing ?? 0}
+        <RangeSlider
+          value={data.smoothing ?? 0}
           min={0}
           max={0.99}
           step={0.01}
-          onValueChange={(v) => updateNodeData(props.id, { smoothing: v })}
-          class="nodrag"
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node) {
+              node.data.smoothing = val;
+            }
+          }}
+          onchange={(e) => updateData({ smoothing: parseFloat((e.target as HTMLInputElement).value) })}
         />
       </div>
       <!-- Level visualization -->
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((props.data.outputValues?.value as number) ?? 0) *
+          style="width: {((outputValues.value?.value as number) ?? 0) *
             100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((props.data.outputValues?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {/if}
 </BaseNode>
+
+
+

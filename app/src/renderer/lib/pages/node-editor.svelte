@@ -6,6 +6,7 @@
     SvelteFlow,
     Controls,
     MiniMap,
+    useSvelteFlow,
     type Connection,
     type IsValidConnection,
   } from "@xyflow/svelte";
@@ -16,6 +17,7 @@
     syncNodeTypesWithRegistry,
   } from "$lib/components/nodes/node-types";
   import NodeSearchPopup from "$lib/components/nodes/NodeSearchPopup.svelte";
+  import FlowHelper from "$lib/components/nodes/FlowHelper.svelte";
   import {
     nodeGraph,
     nodeRuntime,
@@ -31,6 +33,7 @@
     useGraphSerialization,
   } from "$lib/api/nodes/hooks.svelte";
   import { Button } from "$lib/components/ui/button";
+  import * as ContextMenu from "$lib/components/ui/context-menu";
 
   // State - use any to bypass strict SvelteFlow type checking
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -55,10 +58,22 @@
   // Search popup state
   let showSearchPopup = $state(false);
   let searchPopupPosition = $state({ x: 0, y: 0 });
+  let flowPosition = $state({ x: 0, y: 0 }); // Position in flow coordinates
   let pendingConnectionSource = $state<{
     nodeId: string;
     handleId: string | null;
   } | null>(null);
+
+  // Copy/paste state
+  let clipboard = $state<{ nodes: VisoicNode[]; edges: VisoicEdge[] } | null>(null);
+  let lastPastePosition = $state({ x: 0, y: 0 });
+
+  // Context menu state
+  let contextMenuNode = $state<string | null>(null);
+  let contextMenuPosition = $state({ x: 0, y: 0 });
+
+  // SvelteFlow instance (will be set by FlowHelper)
+  let svelteFlowInstance: ReturnType<typeof useSvelteFlow> | null = null;
 
   // Hooks
   const nodeOps = useNodeOperations();
@@ -90,11 +105,40 @@
       isRunning = true;
     });
 
-    // Update stats periodically
+    // Update stats and sync runtime values periodically
     statsInterval = setInterval(() => {
       if (nodeRuntime.running) {
         frameCount = nodeRuntime.currentFrame;
         currentTime = nodeRuntime.currentTime;
+        
+        // Check for silent updates from runtime
+        const dirtyNodes = nodeGraph.getAndClearRuntimeDirtyNodes();
+        if (dirtyNodes.size > 0) {
+          // Only update specific nodes to avoid full re-render
+          // We create a new array reference for Svelte reactivity, but keep object refs for unchanged nodes
+          nodes = nodes.map(n => {
+            if (dirtyNodes.has(n.id)) {
+              // Node has new data in graph (updated in place)
+              // Preserve position and selection from UI state if not syncing from graph
+              // The graph node data is updated in place, so spread n spreads the updated data
+              // BUT we must be careful not to overwrite UI-only state like 'selected', 'dragging', 'position'
+              // if the graph update doesn't include them or has old values.
+              
+              // Actually, Svelte Flow keeps 'selected', 'dragging', 'measured', 'width', 'height' in 'n'
+              // but nodeGraph stores user data in 'n.data'
+              
+              // We should only update 'data' property if that's what changed
+              const graphNode = nodeGraph.getNode(n.id);
+              if (graphNode) {
+                return { 
+                  ...n, 
+                  data: graphNode.data
+                };
+              }
+            }
+            return n;
+          });
+        }
       }
     }, 100);
   });
@@ -112,8 +156,37 @@
     const currentNodes = nodeGraph.getNodes();
     // Ensure all node types are registered before updating state
     syncNodeTypesWithRegistry(currentNodes.map((n) => n.type));
-    nodes = currentNodes;
-    edges = nodeGraph.getEdges();
+    
+    // Create map of current UI nodes to preserve selection/drag state
+    const uiNodeMap = new Map(nodes.map(n => [n.id, n]));
+    
+    nodes = currentNodes.map(graphNode => {
+      const uiNode = uiNodeMap.get(graphNode.id);
+      if (uiNode) {
+        return {
+          ...graphNode,
+          // Preserve UI-only state from Svelte Flow
+          selected: uiNode.selected,
+          dragging: uiNode.dragging,
+          resizing: uiNode.resizing,
+          // Svelte Flow internal dimensions
+          measured: uiNode.measured,
+          width: uiNode.width,
+          height: uiNode.height,
+          // If dragging, prefer UI position to avoid fighting
+          position: uiNode.dragging ? uiNode.position : graphNode.position
+        };
+      }
+      return graphNode;
+    });
+    
+    // Preserve edge selection state
+    const currentEdges = nodeGraph.getEdges();
+    const uiEdgeMap = new Map(edges.map(e => [e.id, e]));
+    edges = currentEdges.map(graphEdge => {
+      const uiEdge = uiEdgeMap.get(graphEdge.id);
+      return uiEdge ? { ...graphEdge, selected: uiEdge.selected } : graphEdge;
+    });
   });
 
   // Toggle runtime
@@ -167,13 +240,58 @@
     nodeOps.updateNode(targetNode.id, { position: targetNode.position });
   }
 
-  // Handle double click to add node
-  function handlePaneDoubleClick(event: MouseEvent) {
-    searchPopupPosition = {
-      x: event.clientX,
-      y: event.clientY,
-    };
+  // Pane context menu state
+  let showPaneContextMenu = $state(false);
+  let paneContextMenuPosition = $state({ x: 0, y: 0 });
+
+  // Handle pane context menu (right click on empty area)
+  function handlePaneContextMenu(event: MouseEvent) {
+    event.preventDefault();
+    paneContextMenuPosition = { x: event.clientX, y: event.clientY };
+    // Calculate flow position for potential node creation
+    if (svelteFlowInstance) {
+      flowPosition = svelteFlowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+    } else {
+      flowPosition = { x: event.clientX - 100, y: event.clientY - 50 };
+    }
+    showPaneContextMenu = true;
+    // Close node context menu if open
+    contextMenuNode = null;
+  }
+
+  // Open node search from pane context menu
+  function openNodeSearchFromMenu() {
+    searchPopupPosition = paneContextMenuPosition;
     pendingConnectionSource = null;
+    showSearchPopup = true;
+    showPaneContextMenu = false;
+  }
+
+  // Paste from pane context menu
+  function pasteFromMenu() {
+    pasteNodes();
+    showPaneContextMenu = false;
+  }
+
+  // Handle output handle double click - open node search popup
+  function handleOutputHandleDoubleClick(nodeId: string, handle: any, event: MouseEvent) {
+    searchPopupPosition = { x: event.clientX, y: event.clientY };
+    // Calculate flow position
+    if (svelteFlowInstance) {
+      flowPosition = svelteFlowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+    } else {
+      flowPosition = { x: event.clientX - 100, y: event.clientY - 50 };
+    }
+    pendingConnectionSource = {
+      nodeId: nodeId,
+      handleId: handle.id,
+    };
     showSearchPopup = true;
   }
 
@@ -186,6 +304,15 @@
         "clientY" in event ? event.clientY : event.touches[0].clientY;
 
       searchPopupPosition = { x: clientX, y: clientY };
+      // Calculate flow position
+      if (svelteFlowInstance) {
+        flowPosition = svelteFlowInstance.screenToFlowPosition({
+          x: clientX,
+          y: clientY,
+        });
+      } else {
+        flowPosition = { x: clientX - 100, y: clientY - 50 };
+      }
       pendingConnectionSource = {
         nodeId: connectionState.fromNode.id,
         handleId: connectionState.fromHandle?.id ?? null,
@@ -196,12 +323,8 @@
 
   // Handle node selection from popup
   function handleNodeSelect(type: string) {
-    // Convert screen position to flow position
-    // Simple offset for now - in production you'd use screenToFlowPosition
-    const node = nodeOps.addNode(type, {
-      x: searchPopupPosition.x - 100,
-      y: searchPopupPosition.y - 50,
-    });
+    // Use flow position calculated when popup was opened
+    const node = nodeOps.addNode(type, flowPosition);
 
     // If we have a pending connection, try to connect
     if (node && pendingConnectionSource) {
@@ -240,6 +363,113 @@
     pendingConnectionSource = null;
   }
 
+  // Copy selected nodes
+  function copySelectedNodes() {
+    const selectedNodes = nodes.filter(n => n.selected);
+    if (selectedNodes.length === 0) return;
+
+    // Get edges between selected nodes
+    const selectedNodeIds = new Set(selectedNodes.map(n => n.id));
+    const selectedEdges = edges.filter(e => 
+      selectedNodeIds.has(e.source) && selectedNodeIds.has(e.target)
+    );
+
+    clipboard = {
+      nodes: JSON.parse(JSON.stringify(selectedNodes)),
+      edges: JSON.parse(JSON.stringify(selectedEdges))
+    };
+    
+    // Reset paste position
+    lastPastePosition = { x: 0, y: 0 };
+  }
+
+  // Paste nodes from clipboard
+  function pasteNodes() {
+    if (!clipboard || clipboard.nodes.length === 0) return;
+
+    // Calculate offset for paste position
+    const offset = { x: lastPastePosition.x + 50, y: lastPastePosition.y + 50 };
+    lastPastePosition = offset;
+
+    // Find min position in clipboard to calculate relative positions
+    const minX = Math.min(...clipboard.nodes.map(n => n.position.x));
+    const minY = Math.min(...clipboard.nodes.map(n => n.position.y));
+
+    // Create ID mapping for new nodes
+    const idMap = new Map<string, string>();
+
+    // Add nodes with new IDs and offset positions
+    for (const node of clipboard.nodes) {
+      const newId = `${node.type.replace(':', '_')}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      idMap.set(node.id, newId);
+
+      const newPosition = {
+        x: node.position.x - minX + offset.x,
+        y: node.position.y - minY + offset.y
+      };
+
+      // Deep clone the data
+      const newData = JSON.parse(JSON.stringify(node.data));
+      
+      // Add to graph
+      nodeGraph.addNode({
+        id: newId,
+        type: node.type,
+        position: newPosition,
+        data: newData
+      } as VisoicNode);
+    }
+
+    // Add edges with updated IDs
+    for (const edge of clipboard.edges) {
+      const newSource = idMap.get(edge.source);
+      const newTarget = idMap.get(edge.target);
+      
+      if (newSource && newTarget) {
+        edgeOps.addEdge({
+          source: newSource,
+          target: newTarget,
+          sourceHandle: edge.sourceHandle,
+          targetHandle: edge.targetHandle
+        });
+      }
+    }
+  }
+
+  // Duplicate a specific node
+  function duplicateNode(nodeId: string) {
+    const node = nodeGraph.getNode(nodeId);
+    if (!node) return;
+
+    const newId = `${node.type.replace(':', '_')}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const newPosition = {
+      x: node.position.x + 50,
+      y: node.position.y + 50
+    };
+
+    const newData = JSON.parse(JSON.stringify(node.data));
+    
+    nodeGraph.addNode({
+      id: newId,
+      type: node.type,
+      position: newPosition,
+      data: newData
+    } as VisoicNode);
+  }
+
+  // Delete a specific node
+  function deleteNode(nodeId: string) {
+    nodeOps.removeNode(nodeId);
+  }
+
+  // Handle node context menu
+  function handleNodeContextMenu(event: MouseEvent, nodeId: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    contextMenuNode = nodeId;
+    contextMenuPosition = { x: event.clientX, y: event.clientY };
+  }
+
   // Keyboard shortcuts
   function handleKeydown(event: KeyboardEvent) {
     // Save/Load shortcuts
@@ -250,6 +480,19 @@
       } else if (event.key === "o") {
         event.preventDefault();
         serialization.importFromFile();
+      } else if (event.key === "c") {
+        event.preventDefault();
+        copySelectedNodes();
+      } else if (event.key === "v") {
+        event.preventDefault();
+        pasteNodes();
+      } else if (event.key === "d") {
+        event.preventDefault();
+        // Duplicate selected nodes
+        const selectedNodes = nodes.filter(n => n.selected);
+        for (const node of selectedNodes) {
+          duplicateNode(node.id);
+        }
       }
     }
   }
@@ -316,19 +559,25 @@
   </div>
 
   <!-- Main Flow -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="w-full h-full" ondblclickcapture={handlePaneDoubleClick}>
+  <div class="w-full h-full">
     <SvelteFlow
-      {nodes}
-      {edges}
+      bind:nodes={nodes}
+      bind:edges={edges}
       nodeTypes={dynamicNodeTypes}
       {isValidConnection}
       onconnect={onConnect}
       ondelete={onDelete}
       onnodedragstop={onNodeDragStop}
       onconnectend={onConnectEnd}
+      onnodecontextmenu={(event) => {
+        handleNodeContextMenu(event.event, event.node.id);
+      }}
+      onpanecontextmenu={(event) => {
+        handlePaneContextMenu(event.event);
+      }}
       colorMode="dark"
       fitView
+      zoomOnDoubleClick={false}
       deleteKey={["Delete", "Backspace"]}
       connectionLineStyle="stroke: #888; stroke-width: 2;"
       defaultEdgeOptions={{
@@ -337,6 +586,10 @@
     >
       <Background bgColor="#0a0a0a" variant={BackgroundVariant.Dots} gap={16} />
       <Controls class="bg-neutral-900! border-neutral-700! rounded-lg!" />
+      <FlowHelper 
+        onInit={(instance) => svelteFlowInstance = instance} 
+        onOutputHandleDoubleClick={handleOutputHandleDoubleClick}
+      />
       <MiniMap
         class="bg-neutral-900! border-neutral-700! rounded-lg!"
         nodeColor={(node) => {
@@ -363,6 +616,95 @@
       />
     </SvelteFlow>
   </div>
+
+  <!-- Node Context Menu -->
+  {#if contextMenuNode}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div 
+      class="fixed inset-0 z-40"
+      onclick={() => contextMenuNode = null}
+    ></div>
+    <div 
+      class="fixed z-50 min-w-[160px] rounded-md border border-neutral-700 bg-neutral-900 p-1 shadow-lg"
+      style="left: {contextMenuPosition.x}px; top: {contextMenuPosition.y}px;"
+    >
+      <button
+        class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+        onclick={() => {
+          duplicateNode(contextMenuNode!);
+          contextMenuNode = null;
+        }}
+      >
+        <span>📋</span>
+        <span>Duplicate</span>
+        <span class="ml-auto text-xs text-neutral-500">Ctrl+D</span>
+      </button>
+      <button
+        class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+        onclick={() => {
+          // Select this node and copy
+          const node = nodes.find(n => n.id === contextMenuNode);
+          if (node) {
+            clipboard = {
+              nodes: [JSON.parse(JSON.stringify(node))],
+              edges: []
+            };
+            lastPastePosition = { x: 0, y: 0 };
+          }
+          contextMenuNode = null;
+        }}
+      >
+        <span>📄</span>
+        <span>Copy</span>
+        <span class="ml-auto text-xs text-neutral-500">Ctrl+C</span>
+      </button>
+      <div class="h-px bg-neutral-700 my-1"></div>
+      <button
+        class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-red-400 rounded hover:bg-neutral-800 cursor-pointer"
+        onclick={() => {
+          deleteNode(contextMenuNode!);
+          contextMenuNode = null;
+        }}
+      >
+        <span>🗑️</span>
+        <span>Delete</span>
+        <span class="ml-auto text-xs text-neutral-500">Del</span>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Pane Context Menu (right click on empty area) -->
+  {#if showPaneContextMenu}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div 
+      class="fixed inset-0 z-40"
+      onclick={() => showPaneContextMenu = false}
+    ></div>
+    <div 
+      class="fixed z-50 min-w-[160px] rounded-md border border-neutral-700 bg-neutral-900 p-1 shadow-lg"
+      style="left: {paneContextMenuPosition.x}px; top: {paneContextMenuPosition.y}px;"
+    >
+      <button
+        class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+        onclick={openNodeSearchFromMenu}
+      >
+        <span>➕</span>
+        <span>Add Node</span>
+      </button>
+      {#if clipboard && clipboard.nodes.length > 0}
+        <button
+          class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+          onclick={pasteFromMenu}
+        >
+          <span>📋</span>
+          <span>Paste</span>
+          <span class="ml-auto text-xs text-neutral-500">Ctrl+V</span>
+        </button>
+      {/if}
+    </div>
+  {/if}
 
   <!-- Search Popup -->
   {#if showSearchPopup}

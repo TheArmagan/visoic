@@ -161,6 +161,7 @@ export interface OutputHandle extends HandleDefinition {
 
 export type NodeCategory =
   | 'shader'
+  | 'renderer'
   | 'math'
   | 'value'
   | 'audio'
@@ -181,6 +182,12 @@ export const NODE_CATEGORIES: Record<NodeCategory, NodeCategoryInfo> = {
     label: 'Shaders',
     color: '#8b5cf6',
     icon: '🎨',
+  },
+  renderer: {
+    id: 'renderer',
+    label: 'Renderer',
+    color: '#ec4899',
+    icon: '🖼️',
   },
   math: {
     id: 'math',
@@ -252,7 +259,7 @@ export interface BaseNodeData {
 // ============================================
 
 export interface RenderContextNodeData extends BaseNodeData {
-  category: 'shader';
+  category: 'renderer';
   /** Node subtype */
   shaderType: 'render:context';
   /** Canvas width */

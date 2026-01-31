@@ -2,10 +2,12 @@
 // Visoic Node System - Render Context Runtime
 // ============================================
 // Manages WebGPU render contexts and shader compositing for the node graph
+// Uses dependency graph (edges) to determine shader execution order
+// Supports shader output reuse - one shader's output can feed multiple shaders
 
 import { nodeGraph } from './graph';
 import { shaderManager, type RenderContext, type ShaderLayer, type BlendMode } from '../shader';
-import type { RenderContextNodeData, ShaderNodeData, VisoicNode } from './types';
+import type { RenderContextNodeData, ShaderNodeData } from './types';
 
 // ============================================
 // Types
@@ -15,15 +17,20 @@ interface ManagedRenderContext {
   nodeId: string;
   context: RenderContext;
   canvas: HTMLCanvasElement;
-  layers: Map<string, ShaderLayer>; // layerNodeId -> ShaderLayer
+  layers: Map<string, ShaderLayer>;
   isRunning: boolean;
 }
 
-interface ShaderLayerInfo {
+interface ShaderNodeRuntime {
   nodeId: string;
   contextNodeId: string;
   layer: ShaderLayer | null;
-  order: number;
+}
+
+interface ShaderDependency {
+  sourceNodeId: string;  // The shader that produces the output
+  targetNodeId: string;  // The shader that consumes the output
+  inputName: string;     // The input handle name (e.g., 'inputImage')
 }
 
 // ============================================
@@ -32,11 +39,15 @@ interface ShaderLayerInfo {
 
 class RenderContextRuntime {
   private contexts: Map<string, ManagedRenderContext> = new Map();
-  private shaderLayers: Map<string, ShaderLayerInfo> = new Map();
+  private shaderNodes: Map<string, ShaderNodeRuntime> = new Map();
   private isInitialized = false;
   private statsUpdateInterval: ReturnType<typeof setInterval> | null = null;
   private syncPending = false;
   private syncDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cached execution order (topologically sorted by dependencies)
+  private executionOrder: Map<string, string[]> = new Map(); // contextId -> [shaderNodeId, ...]
+  private shaderDependencies: Map<string, ShaderDependency[]> = new Map(); // shaderNodeId -> dependencies
 
   // ============================================
   // Lifecycle
@@ -62,7 +73,7 @@ class RenderContextRuntime {
     }, 500);
 
     this.isInitialized = true;
-    console.log('[RenderContextRuntime] Initialized');
+    console.log('[RenderContextRuntime] Initialized with dependency-based execution');
   }
 
   /**
@@ -98,7 +109,9 @@ class RenderContextRuntime {
     }
 
     this.contexts.clear();
-    this.shaderLayers.clear();
+    this.shaderNodes.clear();
+    this.executionOrder.clear();
+    this.shaderDependencies.clear();
     this.isInitialized = false;
   }
 
@@ -171,9 +184,11 @@ class RenderContextRuntime {
     const managed = this.contexts.get(nodeId);
     if (!managed) return;
 
-    // Remove all layers first
-    for (const [layerNodeId] of managed.layers) {
-      this.removeLayerFromContext(layerNodeId, nodeId);
+    // Remove all shader nodes associated with this context
+    for (const [shaderNodeId, runtime] of this.shaderNodes) {
+      if (runtime.contextNodeId === nodeId) {
+        this.removeShaderFromContext(shaderNodeId, nodeId);
+      }
     }
 
     // Stop and destroy context
@@ -181,6 +196,7 @@ class RenderContextRuntime {
     shaderManager.destroyContext(`node:${nodeId}`);
 
     this.contexts.delete(nodeId);
+    this.executionOrder.delete(nodeId);
     console.log(`[RenderContextRuntime] Destroyed context for node ${nodeId}`);
   }
 
@@ -199,13 +215,13 @@ class RenderContextRuntime {
   }
 
   // ============================================
-  // Layer Management
+  // Shader Management (Dependency-Based)
   // ============================================
 
   /**
-   * Add a shader layer to a context
+   * Add a shader to a context
    */
-  async addLayerToContext(
+  async addShaderToContext(
     shaderNodeId: string,
     contextNodeId: string,
     fragmentSource: string,
@@ -217,12 +233,11 @@ class RenderContextRuntime {
       return null;
     }
 
-    // Check if layer already exists
+    // Check if already exists
     if (managed.layers.has(shaderNodeId)) {
       return managed.layers.get(shaderNodeId)!;
     }
 
-    // Get shader node data for layer settings
     const shaderNode = nodeGraph.getNode(shaderNodeId);
     if (!shaderNode) return null;
 
@@ -240,18 +255,17 @@ class RenderContextRuntime {
 
       managed.layers.set(shaderNodeId, layer);
 
-      // Track layer info
-      this.shaderLayers.set(shaderNodeId, {
+      // Track shader runtime
+      this.shaderNodes.set(shaderNodeId, {
         nodeId: shaderNodeId,
         contextNodeId,
         layer,
-        order: shaderData.layerOrder ?? 0,
       });
 
       // Apply initial uniform values
       const inputValues = shaderData.inputValues || {};
       for (const [key, value] of Object.entries(inputValues)) {
-        if (value !== null && value !== undefined && key !== 'renderContext') {
+        if (value !== null && value !== undefined && key !== 'renderContext' && key !== 'inputImage') {
           try {
             layer.setUniform(key, value as number | boolean | number[]);
           } catch (e) {
@@ -260,40 +274,178 @@ class RenderContextRuntime {
         }
       }
 
-      console.log(`[RenderContextRuntime] Added layer ${shaderNodeId} to context ${contextNodeId}`);
+      console.log(`[RenderContextRuntime] Added shader ${shaderNodeId} to context ${contextNodeId}`);
+
+      // Rebuild execution order based on dependencies
+      this.rebuildExecutionOrder(contextNodeId);
+
       return layer;
     } catch (error) {
-      console.error(`[RenderContextRuntime] Failed to add layer ${shaderNodeId}:`, error);
+      console.error(`[RenderContextRuntime] Failed to add shader ${shaderNodeId}:`, error);
       return null;
     }
   }
 
   /**
-   * Remove a shader layer from a context
+   * Remove a shader from a context
    */
-  removeLayerFromContext(shaderNodeId: string, contextNodeId: string): void {
+  removeShaderFromContext(shaderNodeId: string, contextNodeId: string): void {
     const managed = this.contexts.get(contextNodeId);
     if (!managed) return;
 
     if (managed.layers.has(shaderNodeId)) {
       managed.context.removeLayer(shaderNodeId);
       managed.layers.delete(shaderNodeId);
-      this.shaderLayers.delete(shaderNodeId);
-      console.log(`[RenderContextRuntime] Removed layer ${shaderNodeId} from context ${contextNodeId}`);
+      this.shaderNodes.delete(shaderNodeId);
+      this.shaderDependencies.delete(shaderNodeId);
+
+      // Rebuild execution order
+      this.rebuildExecutionOrder(contextNodeId);
+
+      console.log(`[RenderContextRuntime] Removed shader ${shaderNodeId} from context ${contextNodeId}`);
     }
   }
 
+  // ============================================
+  // Dependency Graph & Execution Order
+  // ============================================
+
   /**
-   * Update a shader layer's uniforms
+   * Rebuild the execution order for a context based on edge connections
+   * Uses topological sort to ensure dependencies are processed first
+   * 
+   * Key insight: Shader A's output -> Shader B's inputImage means B depends on A
+   * So A must be rendered before B
    */
-  updateLayerUniforms(shaderNodeId: string, uniforms: Record<string, unknown>): void {
-    const layerInfo = this.shaderLayers.get(shaderNodeId);
-    if (!layerInfo?.layer) return;
+  private rebuildExecutionOrder(contextNodeId: string): void {
+    const edges = nodeGraph.getEdges();
+    const contextShaders: string[] = [];
+
+    // Find all shader nodes connected to this context
+    for (const [nodeId, runtime] of this.shaderNodes) {
+      if (runtime.contextNodeId === contextNodeId) {
+        contextShaders.push(nodeId);
+      }
+    }
+
+    if (contextShaders.length === 0) {
+      this.executionOrder.set(contextNodeId, []);
+      return;
+    }
+
+    // Build dependency map from edges
+    // An edge from shader A's "output" to shader B's "inputImage" means B depends on A
+    const dependencies = new Map<string, Set<string>>(); // nodeId -> Set of nodes it depends on
+    const dependents = new Map<string, Set<string>>(); // nodeId -> Set of nodes that depend on it
+
+    for (const nodeId of contextShaders) {
+      dependencies.set(nodeId, new Set());
+      dependents.set(nodeId, new Set());
+      this.shaderDependencies.set(nodeId, []);
+    }
+
+    // Analyze edges for shader-to-shader connections
+    for (const edge of edges) {
+      const sourceRuntime = this.shaderNodes.get(edge.source);
+      const targetRuntime = this.shaderNodes.get(edge.target);
+
+      // Check if this is a shader-to-shader connection (output -> image input)
+      if (sourceRuntime && targetRuntime &&
+        sourceRuntime.contextNodeId === contextNodeId &&
+        targetRuntime.contextNodeId === contextNodeId) {
+
+        // Source handle should be 'output' (shader output)
+        if (edge.sourceHandle === 'output') {
+          // This means target shader depends on source shader
+          dependencies.get(edge.target)?.add(edge.source);
+          dependents.get(edge.source)?.add(edge.target);
+
+          // Store dependency info for runtime texture binding
+          const deps = this.shaderDependencies.get(edge.target) || [];
+          deps.push({
+            sourceNodeId: edge.source,
+            targetNodeId: edge.target,
+            inputName: edge.targetHandle || 'inputImage',
+          });
+          this.shaderDependencies.set(edge.target, deps);
+        }
+      }
+    }
+
+    // Topological sort using Kahn's algorithm
+    const inDegree = new Map<string, number>();
+    for (const nodeId of contextShaders) {
+      inDegree.set(nodeId, dependencies.get(nodeId)?.size || 0);
+    }
+
+    const queue: string[] = [];
+    for (const [nodeId, degree] of inDegree) {
+      if (degree === 0) {
+        queue.push(nodeId);
+      }
+    }
+
+    const sortedOrder: string[] = [];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      sortedOrder.push(current);
+
+      for (const dependent of dependents.get(current) || []) {
+        const newDegree = (inDegree.get(dependent) || 0) - 1;
+        inDegree.set(dependent, newDegree);
+        if (newDegree === 0) {
+          queue.push(dependent);
+        }
+      }
+    }
+
+    // Check for cycles
+    if (sortedOrder.length !== contextShaders.length) {
+      console.warn('[RenderContextRuntime] Cycle detected in shader graph, using fallback order');
+      // Use whatever we could sort, then add remaining
+      for (const nodeId of contextShaders) {
+        if (!sortedOrder.includes(nodeId)) {
+          sortedOrder.push(nodeId);
+        }
+      }
+    }
+
+    this.executionOrder.set(contextNodeId, sortedOrder);
+
+    // Update the layer order in the context
+    const managed = this.contexts.get(contextNodeId);
+    if (managed) {
+      managed.context.setLayerOrder(sortedOrder);
+
+      // Set up input source mappings based on dependencies
+      // This allows one shader's output to be used as another shader's input
+      for (const shaderNodeId of sortedOrder) {
+        const deps = this.shaderDependencies.get(shaderNodeId) || [];
+        for (const dep of deps) {
+          // Tell the render context that this shader's input should come from another shader's output
+          managed.context.setLayerInputSource(dep.targetNodeId, dep.inputName, dep.sourceNodeId);
+        }
+      }
+    }
+
+    console.log(`[RenderContextRuntime] Execution order for context ${contextNodeId}:`, sortedOrder);
+  }
+
+  // ============================================
+  // Uniform & Settings Updates
+  // ============================================
+
+  /**
+   * Update a shader's uniforms
+   */
+  updateShaderUniforms(shaderNodeId: string, uniforms: Record<string, unknown>): void {
+    const runtime = this.shaderNodes.get(shaderNodeId);
+    if (!runtime?.layer) return;
 
     for (const [key, value] of Object.entries(uniforms)) {
-      if (value !== null && value !== undefined && key !== 'renderContext') {
+      if (value !== null && value !== undefined && key !== 'renderContext' && key !== 'inputImage') {
         try {
-          layerInfo.layer.setUniform(key, value as number | boolean | number[]);
+          runtime.layer.setUniform(key, value as number | boolean | number[]);
         } catch (e) {
           // Uniform might not exist
         }
@@ -302,23 +454,23 @@ class RenderContextRuntime {
   }
 
   /**
-   * Update a shader layer's settings (opacity, blend mode, etc)
+   * Update a shader's settings (opacity, blend mode, etc)
    */
-  updateLayerSettings(
+  updateShaderSettings(
     shaderNodeId: string,
     settings: { enabled?: boolean; opacity?: number; blendMode?: string }
   ): void {
-    const layerInfo = this.shaderLayers.get(shaderNodeId);
-    if (!layerInfo?.layer) return;
+    const runtime = this.shaderNodes.get(shaderNodeId);
+    if (!runtime?.layer) return;
 
     if (settings.enabled !== undefined) {
-      layerInfo.layer.enabled = settings.enabled;
+      runtime.layer.enabled = settings.enabled;
     }
     if (settings.opacity !== undefined) {
-      layerInfo.layer.opacity = settings.opacity;
+      runtime.layer.opacity = settings.opacity;
     }
     if (settings.blendMode !== undefined) {
-      layerInfo.layer.blendMode = settings.blendMode as BlendMode;
+      runtime.layer.blendMode = settings.blendMode as BlendMode;
     }
   }
 
@@ -382,7 +534,7 @@ class RenderContextRuntime {
       for (const shaderNode of shaderNodes) {
         const shaderData = shaderNode.data as ShaderNodeData;
 
-        // Find which context this shader is connected to
+        // Find which context this shader is connected to via renderContext input
         const contextEdge = edges.find(
           (e) =>
             e.target === shaderNode.id &&
@@ -390,21 +542,21 @@ class RenderContextRuntime {
             contextNodeIds.has(e.source)
         );
 
-        const currentLayerInfo = this.shaderLayers.get(shaderNode.id);
+        const currentRuntime = this.shaderNodes.get(shaderNode.id);
 
         if (contextEdge) {
           const contextNodeId = contextEdge.source;
 
-          // Check if layer needs to be moved to a different context
-          if (currentLayerInfo && currentLayerInfo.contextNodeId !== contextNodeId) {
-            this.removeLayerFromContext(shaderNode.id, currentLayerInfo.contextNodeId);
+          // Check if shader needs to be moved to a different context
+          if (currentRuntime && currentRuntime.contextNodeId !== contextNodeId) {
+            this.removeShaderFromContext(shaderNode.id, currentRuntime.contextNodeId);
           }
 
-          // Add layer to context if not already there
-          if (!this.shaderLayers.has(shaderNode.id) || currentLayerInfo?.contextNodeId !== contextNodeId) {
+          // Add shader to context if not already there
+          if (!this.shaderNodes.has(shaderNode.id) || currentRuntime?.contextNodeId !== contextNodeId) {
             if (shaderData.fragmentSource) {
               addLayerPromises.push(
-                this.addLayerToContext(
+                this.addShaderToContext(
                   shaderNode.id,
                   contextNodeId,
                   shaderData.fragmentSource,
@@ -414,9 +566,9 @@ class RenderContextRuntime {
             }
           }
         } else {
-          // Not connected to any context - remove layer if exists
-          if (currentLayerInfo) {
-            this.removeLayerFromContext(shaderNode.id, currentLayerInfo.contextNodeId);
+          // Not connected to any context - remove shader if exists
+          if (currentRuntime) {
+            this.removeShaderFromContext(shaderNode.id, currentRuntime.contextNodeId);
           }
         }
       }
@@ -426,11 +578,16 @@ class RenderContextRuntime {
         await Promise.all(addLayerPromises);
       }
 
-      // Clean up layers for deleted shader nodes
-      for (const [nodeId, layerInfo] of this.shaderLayers) {
+      // Clean up shaders for deleted shader nodes
+      for (const [nodeId, runtime] of this.shaderNodes) {
         if (!shaderNodeIds.has(nodeId)) {
-          this.removeLayerFromContext(nodeId, layerInfo.contextNodeId);
+          this.removeShaderFromContext(nodeId, runtime.contextNodeId);
         }
+      }
+
+      // Rebuild execution orders for all contexts (handles new edges)
+      for (const [contextId] of this.contexts) {
+        this.rebuildExecutionOrder(contextId);
       }
     } finally {
       this.syncPending = false;
@@ -471,53 +628,59 @@ class RenderContextRuntime {
 
   /**
    * Called each frame by the main runtime
+   * Updates shader uniforms based on dependencies
    */
   tick(time: number, deltaTime: number): void {
-    // Update shader layer uniforms from node input values
-    for (const [shaderNodeId, layerInfo] of this.shaderLayers) {
-      if (!layerInfo.layer) continue;
+    // Process each context
+    for (const [contextId, managed] of this.contexts) {
+      const executionOrder = this.executionOrder.get(contextId) || [];
 
-      const node = nodeGraph.getNode(shaderNodeId);
-      if (!node) continue;
+      // Update uniforms for each shader in execution order
+      for (const shaderNodeId of executionOrder) {
+        const runtime = this.shaderNodes.get(shaderNodeId);
+        if (!runtime?.layer) continue;
 
-      const shaderData = node.data as ShaderNodeData;
-      const inputValues = shaderData.inputValues || {};
+        const node = nodeGraph.getNode(shaderNodeId);
+        if (!node) continue;
 
-      // Get or create cache for this shader
-      let cache = this.uniformCache.get(shaderNodeId);
-      if (!cache) {
-        cache = new Map();
-        this.uniformCache.set(shaderNodeId, cache);
-      }
+        const shaderData = node.data as ShaderNodeData;
+        const inputValues = shaderData.inputValues || {};
 
-      // Update all uniforms that have changed
-      for (const [key, value] of Object.entries(inputValues)) {
-        if (key === 'renderContext') continue;
-        if (value === null || value === undefined) continue;
+        // Get or create uniform cache
+        let cache = this.uniformCache.get(shaderNodeId);
+        if (!cache) {
+          cache = new Map();
+          this.uniformCache.set(shaderNodeId, cache);
+        }
 
-        const cachedValue = cache.get(key);
-        // Always update if value changed (comparing by value, not reference)
-        const valueChanged = !this.valuesEqual(cachedValue, value);
-        if (valueChanged) {
-          try {
-            layerInfo.layer.setUniform(key, value as number | boolean | number[]);
-            cache.set(key, value);
-          } catch (e) {
-            // Uniform might not exist
+        // Update uniforms (skip image inputs, they're handled by render-context)
+        for (const [key, value] of Object.entries(inputValues)) {
+          if (key === 'renderContext' || key === 'inputImage') continue;
+          if (value === null || value === undefined) continue;
+
+          const cachedValue = cache.get(key);
+          const valueChanged = !this.valuesEqual(cachedValue, value);
+          if (valueChanged) {
+            try {
+              runtime.layer.setUniform(key, value as number | boolean | number[]);
+              cache.set(key, value);
+            } catch (e) {
+              // Uniform might not exist
+            }
           }
         }
-      }
 
-      // Update layer settings only if changed
-      const layer = layerInfo.layer;
-      if (shaderData.enabled !== undefined && layer.enabled !== (shaderData.enabled !== false)) {
-        layer.enabled = shaderData.enabled !== false;
-      }
-      if (shaderData.opacity !== undefined && layer.opacity !== shaderData.opacity) {
-        layer.opacity = shaderData.opacity;
-      }
-      if (shaderData.blendMode !== undefined && layer.blendMode !== shaderData.blendMode) {
-        layer.blendMode = shaderData.blendMode as BlendMode;
+        // Update layer settings only if changed
+        const layer = runtime.layer;
+        if (shaderData.enabled !== undefined && layer.enabled !== (shaderData.enabled !== false)) {
+          layer.enabled = shaderData.enabled !== false;
+        }
+        if (shaderData.opacity !== undefined && layer.opacity !== shaderData.opacity) {
+          layer.opacity = shaderData.opacity;
+        }
+        if (shaderData.blendMode !== undefined && layer.blendMode !== shaderData.blendMode) {
+          layer.blendMode = shaderData.blendMode as BlendMode;
+        }
       }
     }
   }
@@ -535,6 +698,67 @@ class RenderContextRuntime {
       return true;
     }
     return false;
+  }
+
+  // ============================================
+  // Debug Helpers
+  // ============================================
+
+  /**
+   * Get execution order for a context (for debugging)
+   */
+  getExecutionOrder(contextId: string): string[] {
+    return this.executionOrder.get(contextId) || [];
+  }
+
+  /**
+   * Get dependencies for a shader node (for debugging)
+   */
+  getDependencies(shaderNodeId: string): ShaderDependency[] {
+    return this.shaderDependencies.get(shaderNodeId) || [];
+  }
+
+  /**
+   * Get the output canvas for a specific shader node
+   * This canvas shows only that shader's output, not the entire context composite
+   */
+  getShaderOutputCanvas(shaderNodeId: string): HTMLCanvasElement | null {
+    const runtime = this.shaderNodes.get(shaderNodeId);
+    if (!runtime) {
+      console.warn(`[RenderContextRuntime] Shader ${shaderNodeId} not found`);
+      return null;
+    }
+
+    const managed = this.contexts.get(runtime.contextNodeId);
+    if (!managed) {
+      console.warn(`[RenderContextRuntime] Context for shader ${shaderNodeId} not found`);
+      return null;
+    }
+
+    // Get or create the layer's output canvas
+    const canvas = managed.context.getLayerOutputCanvas(shaderNodeId);
+
+    // Blit the current frame to the canvas
+    if (canvas) {
+      managed.context.blitLayerOutputToCanvas(shaderNodeId);
+    }
+
+    return canvas;
+  }
+
+  /**
+   * Get the shader's layer ID from its node ID
+   */
+  getShaderLayerId(shaderNodeId: string): string | null {
+    const runtime = this.shaderNodes.get(shaderNodeId);
+    return runtime ? shaderNodeId : null;
+  }
+
+  /**
+   * Check if a node is a shader node (not a render context)
+   */
+  isShaderNode(nodeId: string): boolean {
+    return this.shaderNodes.has(nodeId);
   }
 }
 

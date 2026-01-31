@@ -59,6 +59,20 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private intermediateTextureViewB: GPUTextureView | null = null;
   private currentReadTexture: 'A' | 'B' | null = null;
 
+  // Per-layer output textures for dependency-based shader chains
+  // Each layer stores its rendered output so other layers can use it as input
+  private layerOutputTextures: Map<string, GPUTexture> = new Map();
+  private layerOutputTextureViews: Map<string, GPUTextureView> = new Map();
+
+  // Per-layer output canvases for external access (e.g., output windows)
+  // Each layer can have its own canvas showing only that layer's output
+  private layerOutputCanvases: Map<string, HTMLCanvasElement> = new Map();
+  private layerOutputCanvasContexts: Map<string, GPUCanvasContext> = new Map();
+
+  // Input source mapping: which layer's output should be used for which input
+  // Map<targetLayerId, Map<inputName, sourceLayerId>>
+  private layerInputSources: Map<string, Map<string, string>> = new Map();
+
   // Blit pipeline for copying intermediate texture to canvas (swap chain doesn't support CopyDst)
   private blitPipeline: GPURenderPipeline | null = null;
   private blitBindGroupLayout: GPUBindGroupLayout | null = null;
@@ -471,6 +485,23 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.layers.delete(layerId);
     this.layerOrder = this.layerOrder.filter(id => id !== layerId);
 
+    // Clean up output texture
+    this.destroyLayerOutputTexture(layerId);
+
+    // Clean up input source mappings
+    this.layerInputSources.delete(layerId);
+    // Also remove this layer as a source from other layers
+    for (const [, inputMap] of this.layerInputSources) {
+      for (const [inputName, sourceId] of inputMap) {
+        if (sourceId === layerId) {
+          inputMap.delete(inputName);
+        }
+      }
+    }
+
+    // Clean up bind group cache
+    this.bindGroupCache.delete(layerId);
+
     this.emit('layer:removed', { layerId });
     return true;
   }
@@ -508,6 +539,187 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
     this.layerOrder.splice(fromIndex, 1);
     this.layerOrder.splice(toIndex, 0, layerId);
+  }
+
+  // ============================================
+  // Layer Input Source Management (Dependency-Based)
+  // ============================================
+
+  /**
+   * Set which layer's output should be used as input for another layer
+   * This enables dependency-based shader chains where one shader's output
+   * feeds into another shader's input
+   * 
+   * @param targetLayerId - The layer that will receive the input
+   * @param inputName - The name of the input (e.g., 'inputImage')
+   * @param sourceLayerId - The layer whose output will be used, or null to clear
+   */
+  setLayerInputSource(targetLayerId: string, inputName: string, sourceLayerId: string | null): void {
+    if (!this.layers.has(targetLayerId)) return;
+    if (sourceLayerId && !this.layers.has(sourceLayerId)) return;
+
+    let inputMap = this.layerInputSources.get(targetLayerId);
+    if (!inputMap) {
+      inputMap = new Map();
+      this.layerInputSources.set(targetLayerId, inputMap);
+    }
+
+    if (sourceLayerId) {
+      inputMap.set(inputName, sourceLayerId);
+      // Ensure source layer has an output texture
+      this.ensureLayerOutputTexture(sourceLayerId);
+    } else {
+      inputMap.delete(inputName);
+    }
+
+    // Invalidate bind group cache for target layer
+    this.bindGroupCache.delete(targetLayerId);
+  }
+
+  /**
+   * Get the input source mapping for a layer
+   */
+  getLayerInputSources(layerId: string): Map<string, string> | undefined {
+    return this.layerInputSources.get(layerId);
+  }
+
+  /**
+   * Get the output texture view for a layer (if it has been rendered)
+   */
+  getLayerOutputTextureView(layerId: string): GPUTextureView | null {
+    return this.layerOutputTextureViews.get(layerId) ?? null;
+  }
+
+  /**
+   * Ensure a layer has an output texture for its rendered result
+   */
+  private ensureLayerOutputTexture(layerId: string): void {
+    if (!this.device || this.layerOutputTextures.has(layerId)) return;
+
+    const texture = this.device.createTexture({
+      label: `layer-output-${layerId}`,
+      size: [this.width, this.height],
+      format: this.format,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+    });
+
+    this.layerOutputTextures.set(layerId, texture);
+    this.layerOutputTextureViews.set(layerId, texture.createView());
+  }
+
+  /**
+   * Clean up output texture for a layer
+   */
+  private destroyLayerOutputTexture(layerId: string): void {
+    const texture = this.layerOutputTextures.get(layerId);
+    if (texture) {
+      texture.destroy();
+      this.layerOutputTextures.delete(layerId);
+      this.layerOutputTextureViews.delete(layerId);
+    }
+  }
+
+  /**
+   * Ensure a layer has an output canvas for viewing its individual output
+   */
+  ensureLayerOutputCanvas(layerId: string): HTMLCanvasElement | null {
+    if (!this.device) return null;
+
+    // Check if canvas already exists
+    let canvas = this.layerOutputCanvases.get(layerId);
+    if (canvas) return canvas;
+
+    // Create new canvas for this layer
+    canvas = document.createElement('canvas');
+    canvas.width = this.width;
+    canvas.height = this.height;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+
+    // Configure canvas for WebGPU
+    const gpuContext = canvas.getContext('webgpu');
+    if (!gpuContext) {
+      console.error(`[RenderContext] Failed to get WebGPU context for layer ${layerId}`);
+      return null;
+    }
+
+    gpuContext.configure({
+      device: this.device,
+      format: this.format,
+      alphaMode: 'premultiplied',
+    });
+
+    this.layerOutputCanvases.set(layerId, canvas);
+    this.layerOutputCanvasContexts.set(layerId, gpuContext);
+
+    // Also ensure the layer has an output texture
+    this.ensureLayerOutputTexture(layerId);
+
+    return canvas;
+  }
+
+  /**
+   * Get the output canvas for a layer (creates it if needed)
+   */
+  getLayerOutputCanvas(layerId: string): HTMLCanvasElement | null {
+    return this.ensureLayerOutputCanvas(layerId);
+  }
+
+  /**
+   * Blit a layer's output texture to its dedicated canvas
+   * Call this after rendering to update the layer's output canvas
+   */
+  blitLayerOutputToCanvas(layerId: string): void {
+    if (!this.device || !this.blitPipeline || !this.blitBindGroupLayout || !this.blitSampler) return;
+
+    const textureView = this.layerOutputTextureViews.get(layerId);
+    const gpuContext = this.layerOutputCanvasContexts.get(layerId);
+
+    if (!textureView || !gpuContext) return;
+
+    try {
+      const canvasTextureView = gpuContext.getCurrentTexture().createView();
+
+      // Create bind group for blit
+      const blitBindGroup = this.device.createBindGroup({
+        label: `blit-layer-${layerId}`,
+        layout: this.blitBindGroupLayout,
+        entries: [
+          { binding: 0, resource: textureView },
+          { binding: 1, resource: this.blitSampler },
+        ],
+      });
+
+      const commandEncoder = this.device.createCommandEncoder();
+
+      const blitPass = commandEncoder.beginRenderPass({
+        colorAttachments: [
+          {
+            view: canvasTextureView,
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          },
+        ],
+      });
+
+      blitPass.setPipeline(this.blitPipeline);
+      blitPass.setBindGroup(0, blitBindGroup);
+      blitPass.draw(3);
+      blitPass.end();
+
+      this.device.queue.submit([commandEncoder.finish()]);
+    } catch (error) {
+      console.error(`[RenderContext] Failed to blit layer ${layerId} output:`, error);
+    }
+  }
+
+  /**
+   * Clean up output canvas for a layer
+   */
+  private destroyLayerOutputCanvas(layerId: string): void {
+    this.layerOutputCanvases.delete(layerId);
+    this.layerOutputCanvasContexts.delete(layerId);
   }
 
   /**
@@ -1039,59 +1251,72 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         const isFirstLayer = i === 0;
         const isLastLayer = i === enabledLayers.length - 1;
 
-        // Check if this layer has inputImage input
+        // Get layer inputs for texture binding
         const inputs = layer.getCompileResult()?.inputs || [];
-        const hasInputImage = inputs.some(inp => inp.NAME === 'inputImage' && inp.TYPE === 'image');
 
         // Determine output target
         let outputView: GPUTextureView;
         let currentOutputTexture: 'A' | 'B' | null = null;
 
-        // All layers render to intermediate textures for proper blending
-        // Only single layer case renders directly to canvas
-        if (enabledLayers.length === 1) {
-          // Single layer - render directly to canvas
-          outputView = textureView;
-          currentOutputTexture = null;
+        // Always render to intermediate texture so we can copy to output texture
+        // This allows each layer's output to be accessed independently
+        // Write to the opposite texture of what we're reading from
+        if (previousOutputTexture === 'A') {
+          outputView = this.intermediateTextureViewB!;
+          currentOutputTexture = 'B';
         } else {
-          // Multiple layers - all render to intermediate textures
-          // Write to the opposite texture of what we're reading from
-          if (previousOutputTexture === 'A') {
-            outputView = this.intermediateTextureViewB!;
-            currentOutputTexture = 'B';
-          } else {
-            // previousOutputTexture is null or 'B'
-            outputView = this.intermediateTextureViewA!;
-            currentOutputTexture = 'A';
+          // previousOutputTexture is null or 'B'
+          outputView = this.intermediateTextureViewA!;
+          currentOutputTexture = 'A';
+        }
+
+        // Handle image inputs based on dependency mappings or previous layer output
+        const imageInputs = inputs.filter(inp => inp.TYPE === 'image');
+        const inputSourceMap = this.layerInputSources.get(layerId);
+        let needsBindGroupRecreate = false;
+
+        for (const imageInput of imageInputs) {
+          const inputName = imageInput.NAME;
+          let sourceTextureView: GPUTextureView | null = null;
+
+          // Check if there's a specific source layer mapped for this input
+          const sourceLayerId = inputSourceMap?.get(inputName);
+          if (sourceLayerId) {
+            // Use the output texture from the source layer
+            sourceTextureView = this.layerOutputTextureViews.get(sourceLayerId) ?? null;
+          } else if (inputName === 'inputImage' && previousOutputTexture && !isFirstLayer) {
+            // Fallback: use previous layer's output for inputImage (legacy behavior)
+            sourceTextureView = previousOutputTexture === 'A'
+              ? this.intermediateTextureViewA!
+              : this.intermediateTextureViewB!;
+          }
+
+          if (sourceTextureView) {
+            // Check if texture view changed
+            let perLayer = this.layerTextureViews.get(layer.id);
+            const currentView = perLayer?.get(inputName);
+
+            if (currentView !== sourceTextureView) {
+              if (!perLayer) {
+                perLayer = new Map();
+                this.layerTextureViews.set(layer.id, perLayer);
+              }
+              perLayer.set(inputName, sourceTextureView);
+              needsBindGroupRecreate = true;
+            }
           }
         }
 
-        // If this layer needs inputImage, bind the previous render result
-        if (hasInputImage && previousOutputTexture && !isFirstLayer) {
-          const readView = previousOutputTexture === 'A'
-            ? this.intermediateTextureViewA!
-            : this.intermediateTextureViewB!;
+        // Recreate bind group if any input texture changed
+        if (needsBindGroupRecreate) {
+          this.recreateBindGroupForLayer(layer);
 
-          // Check if we need to recreate bind group (only if inputImage changed)
-          const cached = this.bindGroupCache.get(layer.id);
-          if (!cached || cached.inputImageView !== readView) {
-            // Update the texture view for inputImage
-            let perLayer = this.layerTextureViews.get(layer.id);
-            if (!perLayer) {
-              perLayer = new Map();
-              this.layerTextureViews.set(layer.id, perLayer);
-            }
-            perLayer.set('inputImage', readView);
-
-            // Recreate bind group with updated inputImage texture
-            this.recreateBindGroupForLayer(layer);
-
-            // Cache the new bind group
-            this.bindGroupCache.set(layer.id, {
-              bindGroup: layer.bindGroup!,
-              inputImageView: readView,
-            });
-          }
+          // Cache for inputImage (primary input)
+          const inputImageView = this.layerTextureViews.get(layer.id)?.get('inputImage') ?? null;
+          this.bindGroupCache.set(layer.id, {
+            bindGroup: layer.bindGroup!,
+            inputImageView,
+          });
         }
 
         // Best-effort texture upload for other image inputs
@@ -1158,18 +1383,35 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         renderPass.draw(3); // Full-screen triangle
         renderPass.end();
 
+        // Always ensure this layer has an output texture for potential consumers
+        this.ensureLayerOutputTexture(layerId);
+
+        // Copy the rendered result to the layer's output texture
+        // This allows the output to be accessed independently or used by other layers
+        const layerOutputTexture = this.layerOutputTextures.get(layerId);
+        if (layerOutputTexture && currentOutputTexture) {
+          const sourceTexture = currentOutputTexture === 'A'
+            ? this.intermediateTextureA!
+            : this.intermediateTextureB!;
+
+          commandEncoder.copyTextureToTexture(
+            { texture: sourceTexture },
+            { texture: layerOutputTexture },
+            [this.width, this.height]
+          );
+        }
+
         // Update previousOutputTexture for next layer to read from
-        // Only update if this layer wrote to an intermediate texture (not the final canvas)
         if (currentOutputTexture) {
           previousOutputTexture = currentOutputTexture;
         }
       }
 
       // After all layers are rendered, blit the final result to canvas
-      // (only if we have multiple layers and rendered to intermediate textures)
+      // Now we always render to intermediate textures, so we always need to blit
       // Note: We use a render pass instead of copyTextureToTexture because
       // swap chain textures don't support CopyDst usage.
-      if (enabledLayers.length > 1 && previousOutputTexture) {
+      if (previousOutputTexture) {
         const finalTextureView = previousOutputTexture === 'A'
           ? this.intermediateTextureViewA!
           : this.intermediateTextureViewB!;
@@ -1343,6 +1585,15 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.intermediateTextureB = null;
     this.intermediateTextureViewA = null;
     this.intermediateTextureViewB = null;
+
+    // Clean up layer output textures and canvases
+    for (const texture of this.layerOutputTextures.values()) {
+      texture.destroy();
+    }
+    this.layerOutputTextures.clear();
+    this.layerOutputTextureViews.clear();
+    this.layerOutputCanvases.clear();
+    this.layerOutputCanvasContexts.clear();
 
     // Clear caches
     this.bindGroupCache.clear();

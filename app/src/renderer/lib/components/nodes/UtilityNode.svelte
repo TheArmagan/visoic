@@ -1,11 +1,12 @@
 <script lang="ts">
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { UtilityNodeData } from "$lib/api/nodes/types";
+  import { nodeGraph, useNodeProperty } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import * as Select from "$lib/components/ui/select";
   import { Input } from "$lib/components/ui/input";
-  import { Slider } from "$lib/components/ui/slider";
   import { Label } from "$lib/components/ui/label";
+  import { RangeSlider } from "$lib/components/ui/range-slider";
 
   interface Props {
     id: string;
@@ -15,13 +16,38 @@
 
   let props: Props = $props();
 
+  // Use props.data for config values (user editable)
+  const data = $derived(props.data);
+
+  // Subscribe to outputValues changes from nodeGraph (runtime computed values)
+  const outputValues = useNodeProperty<UtilityNodeData, "outputValues">(props.id, "outputValues");
+
   const { updateNodeData } = useSvelteFlow();
 
-  const time = $derived(props.data.outputValues?.time ?? 0);
-  const delta = $derived(props.data.outputValues?.delta ?? 0);
-  const frame = $derived(props.data.outputValues?.frame ?? 0);
+  // Helper to update both nodeGraph and SvelteFlow
+  function updateData(updates: Partial<UtilityNodeData>) {
+    const node = nodeGraph.getNode(props.id);
+    if (node) {
+      for (const [key, value] of Object.entries(updates)) {
+        if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+          (node.data as Record<string, unknown>)[key] = {
+            ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
+            ...value,
+          };
+        } else {
+          (node.data as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
+    updateNodeData(props.id, updates);
+  }
+
+  // Use reactive outputValues from subscription
+  const time = $derived(outputValues.value?.time ?? 0);
+  const delta = $derived(outputValues.value?.delta ?? 0);
+  const frame = $derived(outputValues.value?.frame ?? 0);
   const value = $derived(
-    props.data.outputValues?.value ?? props.data.outputValues?.smoothed ?? 0,
+    outputValues.value?.value ?? outputValues.value?.smoothed ?? 0,
   );
 
   const wrapModes = [
@@ -44,27 +70,27 @@
     { value: "both", label: "Both Edges" },
   ];
 
-  function updateAccumulatorConfig(key: string, value: unknown) {
-    updateNodeData(props.id, {
+  function updateAccumulatorConfig(key: string, val: unknown) {
+    updateData({
       accumulatorConfig: {
-        ...props.data.accumulatorConfig,
-        [key]: value,
+        ...data.accumulatorConfig,
+        [key]: val,
       },
     });
   }
 
-  function updateOscillatorConfig(key: string, value: unknown) {
-    updateNodeData(props.id, {
+  function updateOscillatorConfig(key: string, val: unknown) {
+    updateData({
       oscillatorConfig: {
-        ...props.data.oscillatorConfig,
-        [key]: value,
+        ...data.oscillatorConfig,
+        [key]: val,
       },
     });
   }
 </script>
 
 <BaseNode {...props}>
-  {#if props.data.utilityType === "time"}
+  {#if data.utilityType === "time"}
     <div class="space-y-1 font-mono text-[10px]">
       <div class="flex justify-between text-neutral-400">
         <span>Time:</span>
@@ -81,15 +107,58 @@
         <span class="text-purple-400">{frame}</span>
       </div>
     </div>
-  {:else if props.data.utilityType === "random"}
+  {:else if data.utilityType === "random"}
     <div class="flex flex-col items-center gap-1">
       <span class="text-2xl">🎲</span>
       <span class="text-xs font-mono text-neutral-400">
         {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "smooth"}
-    <div class="flex flex-col items-center gap-1">
+  {:else if data.utilityType === "smooth"}
+    <div class="space-y-2">
+      <div>
+        <Label class="text-[10px] text-neutral-400">Value</Label>
+        <Input
+          type="number"
+          step="0.01"
+          value={data.inputValues?.value ?? 0}
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+            const node = nodeGraph.getNode(props.id);
+            if (node?.data?.inputValues) {
+              node.data.inputValues.value = val;
+            }
+          }}
+          onchange={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+            updateData({ inputValues: { ...data.inputValues, value: val } });
+          }}
+          class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+        />
+      </div>
+      <div>
+        <Label class="text-[10px] text-neutral-400">
+          Speed: {(data.inputValues?.speed ?? 0.1).toFixed(2)}
+        </Label>
+        <RangeSlider
+          value={data.inputValues?.speed ?? 0.1}
+          min={0.001}
+          max={1}
+          step={0.001}
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value) || 0.1;
+            const node = nodeGraph.getNode(props.id);
+            if (node?.data?.inputValues) {
+              node.data.inputValues.speed = val;
+            }
+          }}
+          onchange={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value) || 0.1;
+            updateData({ inputValues: { ...data.inputValues, speed: val } });
+          }}
+          class="w-full nodrag"
+        />
+      </div>
       <div class="w-full h-6 bg-neutral-800 rounded overflow-hidden relative">
         <div
           class="absolute inset-y-0 left-0 bg-linear-to-r from-blue-500 to-purple-500 transition-all duration-100"
@@ -100,29 +169,41 @@
         {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "accumulator"}
+  {:else if data.utilityType === "accumulator"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Rate: {(props.data.accumulatorConfig?.rate ?? 1).toFixed(2)}/s
+          Rate: {(data.accumulatorConfig?.rate ?? 1).toFixed(2)}/s
         </Label>
-        <Slider
-          type="single"
-          value={props.data.accumulatorConfig?.rate ?? 1}
+        <RangeSlider
+          value={data.accumulatorConfig?.rate ?? 1}
           min={-10}
           max={10}
           step={0.1}
-          onValueChange={(v) => updateAccumulatorConfig("rate", v)}
-          class="nodrag"
-        />
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.accumulatorConfig) {
+              node.data.accumulatorConfig.rate = val;
+            }
+          }}
+          onchange={(e) => updateAccumulatorConfig("rate", parseFloat((e.target as HTMLInputElement).value))}
+          />
       </div>
       <div class="grid grid-cols-2 gap-2">
         <div>
           <Label class="text-[10px] text-neutral-400">Min</Label>
           <Input
             type="number"
-            value={props.data.accumulatorConfig?.min ?? 0}
-            oninput={(e) =>
+            value={data.accumulatorConfig?.min ?? 0}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+              const node = nodeGraph.getNode(props.id);
+              if (node?.data?.accumulatorConfig) {
+                node.data.accumulatorConfig.min = val;
+              }
+            }}
+            onchange={(e) =>
               updateAccumulatorConfig(
                 "min",
                 parseFloat((e.target as HTMLInputElement).value) || 0,
@@ -134,8 +215,15 @@
           <Label class="text-[10px] text-neutral-400">Max</Label>
           <Input
             type="number"
-            value={props.data.accumulatorConfig?.max ?? 1}
-            oninput={(e) =>
+            value={data.accumulatorConfig?.max ?? 1}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value) || 1;
+              const node = nodeGraph.getNode(props.id);
+              if (node?.data?.accumulatorConfig) {
+                node.data.accumulatorConfig.max = val;
+              }
+            }}
+            onchange={(e) =>
               updateAccumulatorConfig(
                 "max",
                 parseFloat((e.target as HTMLInputElement).value) || 1,
@@ -148,14 +236,14 @@
         <Label class="text-[10px] text-neutral-400">Mode</Label>
         <Select.Root
           type="single"
-          value={props.data.accumulatorConfig?.mode ?? "wrap"}
-          onValueChange={(v) => updateAccumulatorConfig("mode", v)}
+          value={data.accumulatorConfig?.wrapMode ?? "wrap"}
+          onValueChange={(v) => updateAccumulatorConfig("wrapMode", v)}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
             {wrapModes.find(
-              (m) => m.value === props.data.accumulatorConfig?.mode,
+              (m) => m.value === data.accumulatorConfig?.wrapMode,
             )?.label ?? "Wrap"}
           </Select.Trigger>
           <Select.Content>
@@ -176,20 +264,20 @@
         Value: {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "oscillator"}
+  {:else if data.utilityType === "oscillator"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">Waveform</Label>
         <Select.Root
           type="single"
-          value={props.data.oscillatorConfig?.waveform ?? "sine"}
+          value={data.oscillatorConfig?.waveform ?? "sine"}
           onValueChange={(v) => updateOscillatorConfig("waveform", v)}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
             {waveforms.find(
-              (w) => w.value === props.data.oscillatorConfig?.waveform,
+              (w) => w.value === data.oscillatorConfig?.waveform,
             )?.label ?? "Sine"}
           </Select.Trigger>
           <Select.Content>
@@ -201,48 +289,63 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Frequency: {(props.data.oscillatorConfig?.frequency ?? 1).toFixed(2)} Hz
+          Frequency: {(data.oscillatorConfig?.frequency ?? 1).toFixed(2)} Hz
         </Label>
-        <Slider
-          type="single"
-          value={props.data.oscillatorConfig?.frequency ?? 1}
+        <RangeSlider
+          value={data.oscillatorConfig?.frequency ?? 1}
           min={0.01}
           max={10}
           step={0.01}
-          onValueChange={(v) => updateOscillatorConfig("frequency", v)}
-          class="nodrag"
-        />
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.oscillatorConfig) {
+              node.data.oscillatorConfig.frequency = val;
+            }
+          }}
+          onchange={(e) => updateOscillatorConfig("frequency", parseFloat((e.target as HTMLInputElement).value))}
+          />
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Phase: {((props.data.oscillatorConfig?.phase ?? 0) * 360).toFixed(0)}°
+          Phase: {((data.oscillatorConfig?.phase ?? 0) * 360).toFixed(0)}°
         </Label>
-        <Slider
-          type="single"
-          value={props.data.oscillatorConfig?.phase ?? 0}
+        <RangeSlider
+          value={data.oscillatorConfig?.phase ?? 0}
           min={0}
           max={1}
           step={0.01}
-          onValueChange={(v) => updateOscillatorConfig("phase", v)}
-          class="nodrag"
-        />
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.oscillatorConfig) {
+              node.data.oscillatorConfig.phase = val;
+            }
+          }}
+          onchange={(e) => updateOscillatorConfig("phase", parseFloat((e.target as HTMLInputElement).value))}
+          />
       </div>
-      {#if props.data.oscillatorConfig?.waveform === "pulse"}
+      {#if data.oscillatorConfig?.waveform === "pulse"}
         <div>
           <Label class="text-[10px] text-neutral-400">
             Duty: {(
-              (props.data.oscillatorConfig?.pulseWidth ?? 0.5) * 100
+              (data.oscillatorConfig?.pulseWidth ?? 0.5) * 100
             ).toFixed(0)}%
           </Label>
-          <Slider
-            type="single"
-            value={props.data.oscillatorConfig?.pulseWidth ?? 0.5}
+          <RangeSlider
+            value={data.oscillatorConfig?.pulseWidth ?? 0.5}
             min={0.01}
             max={0.99}
             step={0.01}
-            onValueChange={(v) => updateOscillatorConfig("pulseWidth", v)}
-            class="nodrag"
-          />
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.oscillatorConfig) {
+                node.data.oscillatorConfig.pulseWidth = val;
+              }
+            }}
+            onchange={(e) => updateOscillatorConfig("pulseWidth", parseFloat((e.target as HTMLInputElement).value))}
+            />
         </div>
       {/if}
       <!-- Oscillator visualization -->
@@ -261,15 +364,15 @@
         Value: {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "expression"}
+  {:else if data.utilityType === "expression"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">Expression</Label>
         <Input
           type="text"
-          value={props.data.expression ?? "a + b"}
+          value={data.expression ?? "a + b"}
           oninput={(e) =>
-            updateNodeData(props.id, {
+            updateData({
               expression: (e.target as HTMLInputElement).value,
             })}
           class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag font-mono"
@@ -283,23 +386,23 @@
         Result: {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "trigger"}
+  {:else if data.utilityType === "trigger"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">Mode</Label>
         <Select.Root
           type="single"
-          value={props.data.triggerConfig?.mode ?? "rising"}
+          value={data.triggerConfig?.mode ?? "rising"}
           onValueChange={(v) =>
-            updateNodeData(props.id, {
-              triggerConfig: { ...props.data.triggerConfig, mode: v },
+            updateData({
+              triggerConfig: { ...data.triggerConfig, mode: v },
             })}
         >
           <Select.Trigger
             class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
           >
             {triggerModes.find(
-              (m) => m.value === props.data.triggerConfig?.mode,
+              (m) => m.value === data.triggerConfig?.mode,
             )?.label ?? "Rising Edge"}
           </Select.Trigger>
           <Select.Content>
@@ -311,77 +414,92 @@
       </div>
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Threshold: {(props.data.triggerConfig?.threshold ?? 0.5).toFixed(2)}
+          Threshold: {(data.triggerConfig?.threshold ?? 0.5).toFixed(2)}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.triggerConfig?.threshold ?? 0.5}
+        <RangeSlider
+          value={data.triggerConfig?.threshold ?? 0.5}
           min={0}
           max={1}
           step={0.01}
-          onValueChange={(v) =>
-            updateNodeData(props.id, {
-              triggerConfig: { ...props.data.triggerConfig, threshold: v },
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.triggerConfig) {
+              node.data.triggerConfig.threshold = val;
+            }
+          }}
+          onchange={(e) =>
+            updateData({
+              triggerConfig: { ...data.triggerConfig, threshold: parseFloat((e.target as HTMLInputElement).value) },
             })}
-          class="nodrag"
-        />
+          />
       </div>
       <!-- Trigger indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-yellow-500={props.data.outputValues?.triggered}
-        class:bg-neutral-800={!props.data.outputValues?.triggered}
+        class:bg-yellow-500={outputValues.value?.triggered}
+        class:bg-neutral-800={!outputValues.value?.triggered}
       >
         <span class="text-xs font-bold">
-          {props.data.outputValues?.triggered ? "TRIGGERED" : "—"}
+          {outputValues.value?.triggered ? "TRIGGERED" : "—"}
         </span>
       </div>
     </div>
-  {:else if props.data.utilityType === "noise"}
+  {:else if data.utilityType === "noise"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Octaves: {props.data.noiseConfig?.octaves ?? 4}
+          Octaves: {data.noiseConfig?.octaves ?? 4}
         </Label>
-        <Slider
-          type="single"
-          value={props.data.noiseConfig?.octaves ?? 4}
+        <RangeSlider
+          value={data.noiseConfig?.octaves ?? 4}
           min={1}
           max={8}
           step={1}
-          onValueChange={(v) =>
-            updateNodeData(props.id, {
-              noiseConfig: { ...props.data.noiseConfig, octaves: v },
+          oninput={(e) => {
+            const val = parseInt((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.noiseConfig) {
+              node.data.noiseConfig.octaves = val;
+            }
+          }}
+          onchange={(e) =>
+            updateData({
+              noiseConfig: { ...data.noiseConfig, octaves: parseInt((e.target as HTMLInputElement).value) },
             })}
-          class="nodrag"
-        />
+          />
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
         Value: {(value as number).toFixed(4)}
       </span>
     </div>
-  {:else if props.data.utilityType === "delay"}
+  {:else if data.utilityType === "delay"}
     <div class="space-y-2">
       <div>
         <Label class="text-[10px] text-neutral-400">
-          Delay: {((props.data.delayConfig?.time ?? 0.1) * 1000).toFixed(0)}ms
+          Delay: {((data.delayConfig?.time ?? 0.1) * 1000).toFixed(0)}ms
         </Label>
-        <Slider
-          type="single"
-          value={props.data.delayConfig?.time ?? 0.1}
+        <RangeSlider
+          value={data.delayConfig?.time ?? 0.1}
           min={0.01}
           max={2}
           step={0.01}
-          onValueChange={(v) =>
-            updateNodeData(props.id, {
-              delayConfig: { ...props.data.delayConfig, time: v },
+          oninput={(e) => {
+            const val = parseFloat((e.target as HTMLInputElement).value);
+            const node = nodeGraph.getNode(props.id);
+            if (node && node.data.delayConfig) {
+              node.data.delayConfig.time = val;
+            }
+          }}
+          onchange={(e) =>
+            updateData({
+              delayConfig: { ...data.delayConfig, time: parseFloat((e.target as HTMLInputElement).value) },
             })}
-          class="nodrag"
-        />
+          />
       </div>
       <div class="flex gap-2 text-[10px] text-neutral-500 font-mono">
         <span
-          >In: {((props.data.inputValues?.value as number) ?? 0).toFixed(
+          >In: {((data.inputValues?.value as number) ?? 0).toFixed(
             3,
           )}</span
         >
@@ -391,7 +509,10 @@
     </div>
   {:else}
     <div class="text-center text-xs text-neutral-500">
-      {props.data.utilityType}
+      {data.utilityType}
     </div>
   {/if}
 </BaseNode>
+
+
+

@@ -1,9 +1,10 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { AnyNodeData } from "$lib/api/nodes/types";
+  import type { AnyNodeData, HandleDefinition } from "$lib/api/nodes/types";
   import { NODE_CATEGORIES } from "$lib/api/nodes/types";
   import NodeHandle from "./NodeHandle.svelte";
   import { cn } from "$lib/utils";
+  import { getNodeEditorContext } from "./node-context";
 
   interface Props {
     id: string;
@@ -24,6 +25,11 @@
   }: Props = $props();
 
   const categoryInfo = $derived(NODE_CATEGORIES[data.category]);
+  const editorContext = getNodeEditorContext();
+
+  function handleOutputDoubleClick(handle: HandleDefinition, event: MouseEvent) {
+    editorContext?.onOutputHandleDoubleClick?.(id, handle, event);
+  }
 </script>
 
 <div
@@ -75,7 +81,11 @@
       <div class="flex flex-col gap-1 mt-2">
         {#each data.outputs as output (output.id)}
           <div class="flex justify-end">
-            <NodeHandle handle={output} type="source" />
+            <NodeHandle 
+              handle={output} 
+              type="source" 
+              onHandleDoubleClick={handleOutputDoubleClick}
+            />
           </div>
         {/each}
       </div>

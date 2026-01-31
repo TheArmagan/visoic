@@ -360,6 +360,33 @@ class OutputRuntimeManager {
             }
           }
 
+          // Check if the source is a shader node - get its individual output canvas
+          if (sourceNode.data.category === 'shader' && (sourceNode.data as any).shaderType !== 'render:context') {
+            // Get the shader's own output canvas (not the entire RenderContext composite)
+            const shaderCanvas = renderContextRuntime.getShaderOutputCanvas(edge.source);
+            if (shaderCanvas) {
+              frameSource = shaderCanvas;
+              break;
+            }
+
+            // Fallback: If shader doesn't have its own canvas yet, use the RenderContext canvas
+            // Find the RenderContext this shader is connected to
+            const shaderEdges = nodeGraph.getEdges().filter((e) => e.target === edge.source);
+            for (const shaderEdge of shaderEdges) {
+              if (shaderEdge.targetHandle === 'renderContext') {
+                const contextNode = nodeGraph.getNode(shaderEdge.source);
+                if (contextNode && (contextNode.data as any).shaderType === 'render:context') {
+                  const canvas = renderContextRuntime.getCanvas(shaderEdge.source);
+                  if (canvas) {
+                    frameSource = canvas;
+                    break;
+                  }
+                }
+              }
+            }
+            if (frameSource) break;
+          }
+
           // Check other source outputs
           if (sourceNode?.data.outputValues) {
             // Get frame from source node output values

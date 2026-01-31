@@ -32,6 +32,7 @@ class NodeGraphManager {
   private evaluationOrder: string[] = [];
   private isDirty = true;
   private listeners: Set<() => void> = new Set();
+  private nodeListeners: Map<string, Set<(data: AnyNodeData) => void>> = new Map();
 
   // ============================================
   // State Management
@@ -63,6 +64,51 @@ class NodeGraphManager {
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Subscribe to updates for a specific node.
+   * The callback receives the updated node data whenever that node changes.
+   */
+  subscribeToNode(nodeId: string, listener: (data: AnyNodeData) => void): () => void {
+    if (!this.nodeListeners.has(nodeId)) {
+      this.nodeListeners.set(nodeId, new Set());
+    }
+    this.nodeListeners.get(nodeId)!.add(listener);
+
+    // Return unsubscribe function
+    return () => {
+      const listeners = this.nodeListeners.get(nodeId);
+      if (listeners) {
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          this.nodeListeners.delete(nodeId);
+        }
+      }
+    };
+  }
+
+  private notifyNodeListeners(nodeId: string, data: AnyNodeData): void {
+    const listeners = this.nodeListeners.get(nodeId);
+    if (listeners) {
+      for (const listener of listeners) {
+        listener(data);
+      }
+    }
+  }
+
+  forceUpdate(): void {
+    this.notifyListeners();
+  }
+
+  /**
+   * Force update for a specific node only
+   */
+  forceNodeUpdate(nodeId: string): void {
+    const node = this.nodes.get(nodeId);
+    if (node) {
+      this.notifyNodeListeners(nodeId, node.data);
+    }
   }
 
   private notifyListeners(): void {
@@ -141,20 +187,53 @@ class NodeGraphManager {
     };
     this.nodes.set(nodeId, updatedNode);
     this.isDirty = true;
+
+    // Notify node-specific listeners (for local UI updates)
+    this.notifyNodeListeners(nodeId, updatedNode.data);
+
+    // Notify global listeners (for graph structure changes)
     this.notifyListeners();
   }
 
+  private runtimeDirtyNodes: Set<string> = new Set();
+
   /**
-   * Update node data without triggering listeners.
+   * Update node data without triggering global listeners.
    * Use this for high-frequency updates like audio values that shouldn't cause re-renders.
+   * Still notifies node-specific listeners for local UI updates.
    */
   updateNodeDataSilent(nodeId: string, dataUpdates: Partial<AnyNodeData>): void {
     const node = this.nodes.get(nodeId);
     if (!node) return;
 
-    // Mutate in place for performance (no spread, no new object)
-    Object.assign(node.data, dataUpdates);
-    // Don't mark dirty or notify - these are just value updates
+    // Deep merge for nested objects like inputValues, outputValues, etc.
+    for (const [key, value] of Object.entries(dataUpdates)) {
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        // Merge nested objects
+        (node.data as Record<string, unknown>)[key] = {
+          ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
+          ...value,
+        };
+      } else {
+        // Direct assignment for primitives and arrays
+        (node.data as Record<string, unknown>)[key] = value;
+      }
+    }
+
+    // Mark as dirty for runtime sync
+    this.runtimeDirtyNodes.add(nodeId);
+
+    // Notify node-specific listeners (for local UI updates) - doesn't trigger global re-render
+    this.notifyNodeListeners(nodeId, node.data);
+  }
+
+  /**
+   * Get IDs of nodes that have changed via silent updates since last check
+   */
+  getAndClearRuntimeDirtyNodes(): Set<string> {
+    const dirty = new Set(this.runtimeDirtyNodes);
+    this.runtimeDirtyNodes.clear();
+    return dirty;
   }
 
   getNode(nodeId: string): VisoicNode | undefined {
@@ -328,6 +407,9 @@ class NodeGraphManager {
         node.data.outputValues = result.outputs;
         node.data.hasError = false;
         node.data.errorMessage = undefined;
+
+        // Notify listeners for UI update
+        this.notifyNodeListeners(nodeId, node.data);
       } catch (error) {
         console.error(`Error evaluating node ${nodeId}:`, error);
         node.data.hasError = true;
@@ -572,6 +654,9 @@ class NodeGraphManager {
       expression?: string;
       accumulatorConfig?: {
         wrapMode: 'none' | 'wrap' | 'clamp' | 'pingpong';
+        min?: number;
+        max?: number;
+        rate?: number;
       };
       oscillatorConfig?: {
         waveform: 'sine' | 'square' | 'sawtooth' | 'triangle' | 'pulse';
@@ -612,8 +697,9 @@ class NodeGraphManager {
       case 'accumulator': {
         const rate = Number(inputs.rate ?? 1) * context.deltaTime;
         const reset = Boolean(inputs.reset);
-        const minVal = Number(inputs.min ?? 0);
-        const maxVal = Number(inputs.max ?? 1);
+        // Read min/max from inputs first (connections), fallback to accumulatorConfig (UI), then defaults
+        const minVal = Number(inputs.min ?? data.accumulatorConfig?.min ?? 0);
+        const maxVal = Number(inputs.max ?? data.accumulatorConfig?.max ?? 1);
         const wrapMode = data.accumulatorConfig?.wrapMode ?? 'wrap';
 
         let currentValue = Number(data._state.currentValue ?? 0);

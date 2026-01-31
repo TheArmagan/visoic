@@ -4,10 +4,10 @@
   import { nodeGraph, outputRuntime } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import { Input } from "$lib/components/ui/input";
-  import { Slider } from "$lib/components/ui/slider";
   import { Label } from "$lib/components/ui/label";
   import { Switch } from "$lib/components/ui/switch";
   import { Button } from "$lib/components/ui/button";
+  import { RangeSlider } from "$lib/components/ui/range-slider";
 
   interface Props {
     id: string;
@@ -17,6 +17,9 @@
 
   let props: Props = $props();
   let isWindowOpen = $state(false);
+
+  // Use props.data directly - SvelteFlow handles reactivity
+  const data = $derived(props.data);
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -47,7 +50,7 @@
   function updateWindowConfig(key: string, value: unknown) {
     const updates = {
       windowConfig: {
-        ...props.data.windowConfig,
+        ...data.windowConfig,
         [key]: value,
       },
     };
@@ -60,7 +63,7 @@
   function updateRenderConfig(key: string, value: unknown) {
     const updates = {
       renderConfig: {
-        ...props.data.renderConfig,
+        ...data.renderConfig,
         [key]: value,
       },
     };
@@ -73,23 +76,23 @@
 
 <BaseNode {...props}>
   <div class="flex flex-col items-center gap-2">
-    {#if props.data.outputType === "canvas"}
+    {#if data.outputType === "canvas"}
       <div
         class="w-full aspect-video bg-neutral-800 rounded border border-neutral-700 flex items-center justify-center"
       >
         <span class="text-2xl">📺</span>
       </div>
       <span class="text-[10px] text-neutral-500">
-        Canvas: {props.data.canvasId ?? "main"}
+        Canvas: {data.canvasId ?? "main"}
       </span>
-    {:else if props.data.outputType === "preview"}
+    {:else if data.outputType === "preview"}
       <div
         class="w-full aspect-video bg-neutral-800 rounded border border-neutral-700 flex items-center justify-center"
       >
         <span class="text-2xl">👁️</span>
       </div>
       <span class="text-[10px] text-neutral-500">Preview</span>
-    {:else if props.data.outputType === "window"}
+    {:else if data.outputType === "window"}
       <div class="space-y-2 w-full">
         <!-- Window preview with status indicator -->
         <div
@@ -176,7 +179,7 @@
           <Label class="text-[10px] text-neutral-400">Title</Label>
           <Input
             type="text"
-            value={props.data.windowConfig?.title ?? "Output Window"}
+            value={data.windowConfig?.title ?? "Output Window"}
             oninput={(e) =>
               updateWindowConfig("title", (e.target as HTMLInputElement).value)}
             class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
@@ -188,7 +191,7 @@
             <Label class="text-[10px] text-neutral-400">Width</Label>
             <Input
               type="number"
-              value={props.data.windowConfig?.width ?? 1920}
+              value={data.windowConfig?.width ?? 1920}
               oninput={(e) =>
                 updateWindowConfig(
                   "width",
@@ -202,7 +205,7 @@
             <Label class="text-[10px] text-neutral-400">Height</Label>
             <Input
               type="number"
-              value={props.data.windowConfig?.height ?? 1080}
+              value={data.windowConfig?.height ?? 1080}
               oninput={(e) =>
                 updateWindowConfig(
                   "height",
@@ -215,7 +218,7 @@
         </div>
         <div class="flex items-center gap-2">
           <Switch
-            checked={props.data.windowConfig?.fullscreen ?? false}
+            checked={data.windowConfig?.fullscreen ?? false}
             onCheckedChange={(v) => updateWindowConfig("fullscreen", v)}
             class="nodrag"
             disabled={isWindowOpen}
@@ -224,43 +227,54 @@
         </div>
         <div>
           <Label class="text-[10px] text-neutral-400">
-            Monitor: {props.data.windowConfig?.monitor ?? 0}
+            Monitor: {data.windowConfig?.monitor ?? 0}
           </Label>
-          <Slider
-            type="single"
-            value={props.data.windowConfig?.monitor ?? 0}
+          <RangeSlider
+            value={data.windowConfig?.monitor ?? 0}
             min={0}
             max={4}
             step={1}
-            onValueChange={(v) => updateWindowConfig("monitor", v)}
-            class="nodrag"
+            oninput={(e) => {
+              const val = parseInt((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.windowConfig) {
+                node.data.windowConfig.monitor = val;
+              }
+            }}
+            onchange={(e) => updateWindowConfig("monitor", parseInt((e.target as HTMLInputElement).value))}
+            class="nodrag w-full h-2 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-white"
             disabled={isWindowOpen}
           />
         </div>
         <div>
           <Label class="text-[10px] text-neutral-400">
-            FPS Limit: {props.data.renderConfig?.fps ?? 60}
+            FPS Limit: {data.renderConfig?.fps ?? 60}
           </Label>
-          <Slider
-            type="single"
-            value={props.data.renderConfig?.fps ?? 60}
+          <RangeSlider
+            value={data.renderConfig?.fps ?? 60}
             min={1}
             max={240}
             step={1}
-            onValueChange={(v) => updateRenderConfig("fps", v)}
-            class="nodrag"
-          />
+            oninput={(e) => {
+              const val = parseInt((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.renderConfig) {
+                node.data.renderConfig.fps = val;
+              }
+            }}
+            onchange={(e) => updateRenderConfig("fps", parseInt((e.target as HTMLInputElement).value))}
+            />
         </div>
         <div class="flex items-center gap-2">
           <Switch
-            checked={props.data.renderConfig?.showFps ?? false}
+            checked={data.renderConfig?.showFps ?? false}
             onCheckedChange={(v) => updateRenderConfig("showFps", v)}
             class="nodrag"
           />
           <Label class="text-[10px] text-neutral-400">Show FPS</Label>
         </div>
       </div>
-    {:else if props.data.outputType === "ndi"}
+    {:else if data.outputType === "ndi"}
       <div class="space-y-2 w-full">
         <div
           class="w-full aspect-video bg-linear-to-br from-blue-900/50 to-purple-900/50 rounded border border-blue-700 flex items-center justify-center"
@@ -271,7 +285,7 @@
           <Label class="text-[10px] text-neutral-400">Stream Name</Label>
           <Input
             type="text"
-            value={props.data.windowConfig?.title ?? "Visoic Output"}
+            value={data.windowConfig?.title ?? "Visoic Output"}
             oninput={(e) =>
               updateWindowConfig("title", (e.target as HTMLInputElement).value)}
             class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
@@ -279,24 +293,29 @@
         </div>
         <div>
           <Label class="text-[10px] text-neutral-400">
-            FPS: {props.data.renderConfig?.fps ?? 60}
+            FPS: {data.renderConfig?.fps ?? 60}
           </Label>
-          <Slider
-            type="single"
-            value={props.data.renderConfig?.fps ?? 60}
+          <RangeSlider
+            value={data.renderConfig?.fps ?? 60}
             min={24}
             max={120}
             step={1}
-            onValueChange={(v) => updateRenderConfig("fps", v)}
-            class="nodrag"
-          />
+            oninput={(e) => {
+              const val = parseInt((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.renderConfig) {
+                node.data.renderConfig.fps = val;
+              }
+            }}
+            onchange={(e) => updateRenderConfig("fps", parseInt((e.target as HTMLInputElement).value))}
+            />
         </div>
         <span class="text-[10px] text-blue-400">
-          Resolution: {props.data.windowConfig?.width ?? 1920}×{props.data
+          Resolution: {data.windowConfig?.width ?? 1920}×{data
             .windowConfig?.height ?? 1080}
         </span>
       </div>
-    {:else if props.data.outputType === "spout"}
+    {:else if data.outputType === "spout"}
       <div class="space-y-2 w-full">
         <div
           class="w-full aspect-video bg-linear-to-br from-green-900/50 to-emerald-900/50 rounded border border-green-700 flex items-center justify-center"
@@ -307,14 +326,14 @@
           <Label class="text-[10px] text-neutral-400">Sender Name</Label>
           <Input
             type="text"
-            value={props.data.windowConfig?.title ?? "Visoic"}
+            value={data.windowConfig?.title ?? "Visoic"}
             oninput={(e) =>
               updateWindowConfig("title", (e.target as HTMLInputElement).value)}
             class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
           />
         </div>
         <span class="text-[10px] text-green-400">
-          Resolution: {props.data.windowConfig?.width ?? 1920}×{props.data
+          Resolution: {data.windowConfig?.width ?? 1920}×{data
             .windowConfig?.height ?? 1080}
         </span>
       </div>
@@ -328,3 +347,5 @@
     {/if}
   </div>
 </BaseNode>
+
+
