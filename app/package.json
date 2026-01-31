@@ -12,7 +12,10 @@
     "dev:renderer": "vite",
     "dev": "concurrently \"npm run dev:main\" \"npm run dev:renderer\" \"wait-on http://localhost:5173 && cross-env ELECTRON_DEV=true NODE_ENV=development electron .\"",
     "start": "electron .",
-    "postinstall": "electron-builder install-app-deps"
+    "postinstall": "electron-builder install-app-deps",
+    "shader-test": "node shader-test-cli.js",
+    "shader-test:watch": "node shader-test-cli.js watch",
+    "shader-test:start": "node shader-test-cli.js start"
   },
   "keywords": [
     "electron",

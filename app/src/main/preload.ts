@@ -31,4 +31,36 @@ contextBridge.exposeInMainWorld('VISOICNative', {
     readShaderById: (id: string): Promise<{ fragment: string; vertex: string | null } | null> =>
       ipcRenderer.invoke('isf:readShaderById', id),
   },
+  // Shader Test Suite API
+  shaderTest: {
+    // Send test progress to main process (for CLI clients)
+    sendProgress: (progress: unknown) => ipcRenderer.send('shader-test:progress', progress),
+    // Send test result to main process
+    sendResult: (result: unknown) => ipcRenderer.send('shader-test:result', result),
+    // Send test complete notification
+    sendComplete: (suiteResult: unknown) => ipcRenderer.send('shader-test:complete', suiteResult),
+    // Get current test state
+    getState: (): Promise<unknown> => ipcRenderer.invoke('shader-test:get-state'),
+    // Get last error for a shader
+    getLastError: (shaderId: string): Promise<{ error: string; wgsl: string } | null> =>
+      ipcRenderer.invoke('shader-test:get-last-error', shaderId),
+    // Clear test results
+    clear: () => ipcRenderer.send('shader-test:clear'),
+    // Listen for test start command from CLI
+    onStart: (callback: (config: unknown) => void) => {
+      ipcRenderer.on('shader-test:start', (_event, config) => callback(config));
+    },
+    // Listen for test stop command from CLI
+    onStop: (callback: () => void) => {
+      ipcRenderer.on('shader-test:stop', () => callback());
+    },
+    // Listen for retry shader command from CLI
+    onRetry: (callback: (payload: { shaderId: string }) => void) => {
+      ipcRenderer.on('shader-test:retry', (_event, payload) => callback(payload));
+    },
+    // Listen for navigate to test page command
+    onNavigate: (callback: () => void) => {
+      ipcRenderer.on('shader-test:navigate', () => callback());
+    },
+  },
 });

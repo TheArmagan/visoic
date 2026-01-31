@@ -25,6 +25,18 @@ export type {
   ShaderError,
 } from './types';
 
+// Test Suite Types
+export type {
+  ShaderTestResult,
+  ShaderTestSuiteResult,
+  ShaderTestProgress,
+  ShaderFixSuggestion,
+  ShaderTestIPCMessage,
+  ShaderTestConfig,
+} from './test-types';
+
+export { DEFAULT_TEST_CONFIG } from './test-types';
+
 export { BUILTIN_UNIFORMS } from './types';
 
 // Classes

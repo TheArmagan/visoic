@@ -228,9 +228,23 @@ export class ISFParser {
 
       if (code.slice(i, i + n) !== name) continue;
 
-      // Skip whitespace between NAME and '('
+      // Skip whitespace and comments between NAME and '('
       let j = i + n;
-      while (j < code.length && /\s/.test(code[j])) j++;
+      while (j < code.length) {
+        if (/\s/.test(code[j])) {
+          j++;
+          continue;
+        }
+        // Check for __COMMENT_N__ pattern
+        if (code.slice(j).startsWith('__COMMENT_')) {
+          const commMatch = code.slice(j).match(/^__COMMENT_\d+__/);
+          if (commMatch) {
+            j += commMatch[0].length;
+            continue;
+          }
+        }
+        break;
+      }
       if (code[j] !== '(') continue;
 
       return { startIndex: i, argsStartIndex: j };
@@ -354,15 +368,28 @@ export class ISFParser {
     });
 
     // texture2D(tex, coord) -> textureSampleLevel(tex, texSampler, coord, 0.0)
+    // texture2D(tex, coord, bias) -> textureSampleLevel(tex, texSampler, coord, bias)
     wgsl = this.replaceCall(wgsl, 'texture2D', (args) => {
-      if (args.length !== 2) return null;
-      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+      if (args.length === 2) {
+        return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+      }
+      if (args.length === 3) {
+        // Third argument is LOD bias in GLSL, use it as LOD level
+        return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, ${args[2]})`;
+      }
+      return null;
     });
 
     // texture(tex, coord) -> textureSampleLevel(tex, texSampler, coord, 0.0)
+    // texture(tex, coord, bias) -> textureSampleLevel(tex, texSampler, coord, bias)
     wgsl = this.replaceCall(wgsl, 'texture', (args) => {
-      if (args.length !== 2) return null;
-      return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+      if (args.length === 2) {
+        return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, 0.0)`;
+      }
+      if (args.length === 3) {
+        return `textureSampleLevel(${args[0]}, ${args[0]}Sampler, ${args[1]}, ${args[2]})`;
+      }
+      return null;
     });
 
     // textureLod(tex, coord, lod) -> textureSampleLevel(tex, texSampler, coord, lod)
@@ -375,6 +402,25 @@ export class ISFParser {
     wgsl = this.replaceCall(wgsl, 'textureSample', (args) => {
       if (args.length !== 3) return null;
       return `textureSampleLevel(${args[0]}, ${args[1]}, ${args[2]}, 0.0)`;
+    });
+
+    // IMG_SIZE(tex) -> vec2<f32>(textureDimensions(tex))
+    // ISF function to get texture dimensions
+    wgsl = this.replaceCall(wgsl, 'IMG_SIZE', (args) => {
+      if (args.length !== 1) return null;
+      return `vec2<f32>(textureDimensions(${args[0]}))`;
+    });
+
+    // textureSize(tex, lod) -> vec2<f32>(textureDimensions(tex, lod))
+    // GLSL function to get texture size
+    wgsl = this.replaceCall(wgsl, 'textureSize', (args) => {
+      if (args.length === 1) {
+        return `vec2<f32>(textureDimensions(${args[0]}))`;
+      }
+      if (args.length === 2) {
+        return `vec2<f32>(textureDimensions(${args[0]}, u32(${args[1]})))`;
+      }
+      return null;
     });
 
     return wgsl;
@@ -554,6 +600,24 @@ export class ISFParser {
   private generateWGSL(): { fragmentShader: string; vertexShader: string } {
     const inputs = this.metadata?.INPUTS || [];
 
+    // WGSL reserved keywords that can't be used as uniform names
+    const wgslReservedKeywords = new Set([
+      'type', 'move', 'target', 'ref', 'filter', 'sample', 'sampler', 'read', 'write',
+      'static', 'uniform', 'storage', 'private', 'function', 'workgroup', 'push_constant',
+      'const', 'let', 'var', 'override', 'struct', 'bitcast', 'discard', 'enable',
+      'alias', 'break', 'case', 'continue', 'continuing', 'default', 'else', 'elseif',
+      'fallthrough', 'for', 'if', 'loop', 'return', 'switch', 'while', 'from',
+      'final', 'texture', 'true', 'false', 'null', 'ptr', 'fn', 'array'
+    ]);
+
+    // Helper function to get safe uniform name
+    const getSafeUniformName = (name: string): string => {
+      if (wgslReservedKeywords.has(name)) {
+        return `isf_${name}`;
+      }
+      return name;
+    };
+
     // Build uniform struct
     let uniformStruct = 'struct Uniforms {\n';
     uniformStruct += '  time: f32,\n';
@@ -570,14 +634,24 @@ export class ISFParser {
       'frameIndex', 'layerOpacity', 'speed', 'date'
     ]);
 
+    // Track renamed uniforms for later replacement in shader code
+    const renamedUniforms = new Map<string, string>();
+
     // Add user inputs to uniform struct
     for (const input of inputs) {
       if (input.TYPE !== 'image' && !reservedUniforms.has(input.NAME)) {
         const wgslType = TYPE_MAP[input.TYPE] || 'f32';
-        uniformStruct += `  ${input.NAME}: ${wgslType},\n`;
+        const safeName = getSafeUniformName(input.NAME);
+        uniformStruct += `  ${safeName}: ${wgslType},\n`;
+        if (safeName !== input.NAME) {
+          renamedUniforms.set(input.NAME, safeName);
+        }
       }
     }
     uniformStruct += '};\n\n';
+
+    // Store renamed uniforms for use in convertGLSLtoWGSL
+    (this as any)._renamedUniforms = renamedUniforms;
 
     // Build bindings
     let bindings = '@group(0) @binding(0) var<uniform> uniforms: Uniforms;\n';
@@ -940,6 +1014,11 @@ ${convertedMain}
     // GLSL: var a: f32 = 1.0, b = 2.0, c = 3.0;  ->  var a: f32 = 1.0; var b: f32 = 2.0; var c: f32 = 3.0;
     wgsl = this.splitCommaVariableDeclarations(wgsl);
 
+    // Convert GLSL texture coordinate swizzles to WGSL equivalents
+    // GLSL: .stpq is an alias for .xyzw used with texture coordinates
+    // We need to convert these carefully to avoid breaking other identifiers
+    wgsl = this.convertGLSLSwizzles(wgsl);
+
     // Replace built-in functions
     wgsl = wgsl.replace(/\bclamp\s*\(/g, 'clamp(');
     wgsl = wgsl.replace(/\bmin\s*\(/g, 'min(');
@@ -973,6 +1052,11 @@ ${convertedMain}
     wgsl = wgsl.replace(/\breflect\s*\(/g, 'reflect(');
     wgsl = wgsl.replace(/\brefract\s*\(/g, 'refract(');
     wgsl = wgsl.replace(/\bstep\s*\(/g, 'step(');
+
+    // Convert GLSL comparison functions to WGSL equivalents
+    // GLSL: lessThan(a, b) -> WGSL: a < b (component-wise for vectors)
+    // These need special handling because WGSL uses operators instead
+    wgsl = this.convertGLSLComparisonFunctions(wgsl);
     wgsl = wgsl.replace(/\bsmoothstep\s*\(/g, 'smoothstep(');
 
     // ++/-- are not supported in WGSL.
@@ -986,23 +1070,44 @@ ${convertedMain}
     wgsl = this.replaceTextureSamplingCalls(wgsl);
 
 
-    // Replace built-in variables
-    wgsl = wgsl.replace(/\bisf_FragNormCoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\bvv_FragNormCoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\btexCoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\btexcoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\bv_texcoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\bvTexCoord\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\bv_uv\b/g, 'input.uv');
-    wgsl = wgsl.replace(/\bvUv\b/g, 'input.uv');
+    // Replace built-in variables (but not variable declarations with these names)
+    // Use smart replacement that skips declarations (var X, let X, const X, or X:)
+    const replaceBuiltinVar = (code: string, pattern: string, replacement: string): string => {
+      return code.replace(new RegExp(`\\b${pattern}\\b`, 'g'), (match, offset, string) => {
+        // Check prefix to avoid replacing variable declarations
+        const prefix = string.slice(0, offset).trimEnd();
+        if (prefix.endsWith('var') || prefix.endsWith('let') || prefix.endsWith('const') || prefix.endsWith(':')) {
+          return match;
+        }
+        return replacement;
+      });
+    };
+
+    wgsl = replaceBuiltinVar(wgsl, 'isf_FragNormCoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'vv_FragNormCoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'texCoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'texcoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'v_texcoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'vTexCoord', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'v_uv', 'input.uv');
+    wgsl = replaceBuiltinVar(wgsl, 'vUv', 'input.uv');
     wgsl = wgsl.replace(/\bisf_FragCoord\b/g, '(input.uv * uniforms.renderSize)');
     // Handle Shadertoy-style mainImage function BEFORE replacing fragCoord
     // This preserves the parameter name in the function signature
     wgsl = this.convertMainImageFunction(wgsl);
     wgsl = wgsl.replace(/\bfragCoord\b/g, '(input.uv * uniforms.renderSize)');
     wgsl = wgsl.replace(/\bgl_FragCoord\b/g, '(input.uv * uniforms.renderSize)');
-    wgsl = wgsl.replace(/\bgl_FragColor\b/g, 'outputColor');
-    wgsl = wgsl.replace(/\bfragColor\b/g, 'outputColor');
+    wgsl = wgsl.replace(/\bgl_FragColor\b/g, '_isf_fragColor');
+    wgsl = wgsl.replace(/\bfragColor\b/g, '_isf_fragColor');
+
+    // Handle case where fragColor/_isf_fragColor was declared as a local/global variable
+    // We want to turn "vec4 _isf_fragColor = ..." into "_isf_fragColor = ..." (assignment)
+    // And "vec4 _isf_fragColor;" into comment
+    // Also handle WGSL-style: "var _isf_fragColor: vec4<f32> = ..." -> "_isf_fragColor ="
+    wgsl = wgsl.replace(/\b(vec4|var)\s+_isf_fragColor\s*(?::\s*vec4<f32>)?\s*(=|;)/g, (match, type, op) => {
+      if (op === '=') return '_isf_fragColor =';
+      return '// ' + match;
+    });
 
     // ISF built-in uniforms (capitalized)
     wgsl = wgsl.replace(/\bTIME\b(?!\()/g, 'uniforms.time');
@@ -1026,8 +1131,15 @@ ${convertedMain}
     // Parameter local copies are: var name: TYPE = name_in;
     // We should not replace the "name" in variable declarations that are followed by "_in"
     const inputs = this.metadata?.INPUTS || [];
+
+    // Get renamed uniforms map (created in generateWGSL)
+    const renamedUniforms = (this as any)._renamedUniforms as Map<string, string> || new Map();
+
     for (const input of inputs) {
       if (input.TYPE !== 'image') {
+        // Get the safe uniform name (might be renamed if it was a reserved keyword)
+        const safeUniformName = renamedUniforms.get(input.NAME) || input.NAME;
+
         // Negative lookahead to avoid replacing in "var name: TYPE = name_in" pattern
         // Also avoid replacing when preceded by "var " (variable declaration of same name)
         // Also ensure not to replace member access (e.g., .r where r is an input name)
@@ -1036,9 +1148,9 @@ ${convertedMain}
         // Ensure int/long inputs are cast to i32, as they are stored as f32 in uniforms
         // but used as integers in GLSL logic (function args, array indices)
         if (input.TYPE === 'int' || input.TYPE === 'long') {
-          wgsl = wgsl.replace(regex, `i32(uniforms.${input.NAME})`);
+          wgsl = wgsl.replace(regex, `i32(uniforms.${safeUniformName})`);
         } else {
-          wgsl = wgsl.replace(regex, `uniforms.${input.NAME}`);
+          wgsl = wgsl.replace(regex, `uniforms.${safeUniformName}`);
         }
       }
     }
@@ -1051,8 +1163,9 @@ ${convertedMain}
         .map((i) => i.NAME),
     );
     for (const name of boolLike) {
-      const u = new RegExp(`\\buniforms\\.${name}\\b`, 'g');
-      wgsl = wgsl.replace(u, `(uniforms.${name} != 0.0)`);
+      const safeUniformName = renamedUniforms.get(name) || name;
+      const u = new RegExp(`\\buniforms\\.${safeUniformName}\\b`, 'g');
+      wgsl = wgsl.replace(u, `(uniforms.${safeUniformName} != 0.0)`);
     }
 
     // Rewrite GLSL casts/mod that WGSL doesn't support.
@@ -1124,7 +1237,7 @@ ${convertedMain}
       /void\s+main\s*\(\s*(void)?\s*\)\s*\{/,
       `@fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  var outputColor: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);${initVarsCode}`
+  var _isf_fragColor: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 1.0);${initVarsCode}`
     );
 
     // Ensure fs_main returns outputColor at its actual closing brace (not the last brace in the file).
@@ -1242,19 +1355,33 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     if (closeIdx === -1) return code;
 
+    // Replace bare 'return;' with proper return value inside fs_main
+    // This handles early returns in the original GLSL code
+    const originalBody = code.slice(openIdx, closeIdx);
+    const fixedBody = originalBody.replace(
+      /\breturn\s*;/g,
+      'return vec4<f32>(_isf_fragColor.rgb, _isf_fragColor.a * uniforms.layerOpacity);'
+    );
+
+    // If body changed, update code and index
+    if (fixedBody !== originalBody) {
+      code = code.slice(0, openIdx) + fixedBody + code.slice(closeIdx);
+      closeIdx = openIdx + fixedBody.length;
+    }
+
     const beforeClose = code.slice(0, closeIdx);
     // Check if there's already a return with opacity applied
     if (/\breturn\s+vec4.*layerOpacity\s*\)\s*;\s*$/.test(beforeClose)) return code;
-    // Check if there's already a simple return outputColor
-    if (/\breturn\s+outputColor\s*;\s*$/.test(beforeClose)) {
+    // Check if there's already a simple return _isf_fragColor
+    if (/\breturn\s+_isf_fragColor\s*;\s*$/.test(beforeClose)) {
       // Replace it with opacity-applied version
       return code.slice(0, closeIdx).replace(
-        /\breturn\s+outputColor\s*;\s*$/,
-        'return vec4<f32>(outputColor.rgb, outputColor.a * uniforms.layerOpacity);\n'
+        /\breturn\s+_isf_fragColor\s*;\s*$/,
+        'return vec4<f32>(_isf_fragColor.rgb, _isf_fragColor.a * uniforms.layerOpacity);\n'
       ) + code.slice(closeIdx);
     }
 
-    return code.slice(0, closeIdx) + '\n  return vec4<f32>(outputColor.rgb, outputColor.a * uniforms.layerOpacity);\n' + code.slice(closeIdx);
+    return code.slice(0, closeIdx) + '\n  return vec4<f32>(_isf_fragColor.rgb, _isf_fragColor.a * uniforms.layerOpacity);\n' + code.slice(closeIdx);
   }
 
   /**
@@ -1885,6 +2012,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       '} else { $1 }'
     );
 
+    // Also handle: else followed by newline then statement (without brace)
+    // This catches: else\n    statement;
+    result = result.replace(
+      /\belse\s*\n\s*(?!\{)(?!if\b)([^;{]+;)/g,
+      'else { $1 }'
+    );
+
     return result;
   }
 
@@ -2025,6 +2159,70 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         return statements.join(' ');
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert GLSL texture coordinate swizzles (.stpq) to WGSL equivalents (.xyzw)
+   * GLSL allows .stpq as an alias for .xyzw, commonly used with texture coordinates
+   * WGSL only supports .xyzw and .rgba swizzle sets
+   */
+  private convertGLSLSwizzles(code: string): string {
+    let result = code;
+
+    // Map GLSL stpq components to xyzw
+    const swizzleMap: Record<string, string> = {
+      's': 'x', 't': 'y', 'p': 'z', 'q': 'w'
+    };
+
+    // Match swizzle patterns after a dot: .stpq combinations (1-4 chars)
+    // Only match if the swizzle contains at least one of s, t, p, q
+    // and only contains s, t, p, q characters
+    // Negative lookbehind to avoid matching in the middle of identifiers
+    // Positive lookahead to ensure we're not matching part of a longer identifier
+    const swizzlePattern = /\.([stpq]{1,4})(?![a-zA-Z0-9_])/g;
+
+    result = result.replace(swizzlePattern, (match, swizzle: string) => {
+      // Check if this swizzle only contains stpq characters
+      if (!/^[stpq]+$/.test(swizzle)) {
+        return match;
+      }
+
+      // Convert each character
+      const converted = swizzle.split('').map(c => swizzleMap[c] || c).join('');
+      return '.' + converted;
+    });
+
+    return result;
+  }
+
+  /**
+   * Convert GLSL comparison functions to WGSL operator expressions
+   * GLSL has lessThan, lessThanEqual, greaterThan, greaterThanEqual, equal, notEqual
+   * These return bvecN (boolean vector) in GLSL
+   * WGSL doesn't have these functions - need to convert to comparison operators
+   */
+  private convertGLSLComparisonFunctions(code: string): string {
+    let result = code;
+
+    // Define the comparison functions and their operators
+    const comparisonFuncs: Array<{ name: string; op: string }> = [
+      { name: 'lessThan', op: '<' },
+      { name: 'lessThanEqual', op: '<=' },
+      { name: 'greaterThan', op: '>' },
+      { name: 'greaterThanEqual', op: '>=' },
+      { name: 'equal', op: '==' },
+      { name: 'notEqual', op: '!=' },
+    ];
+
+    for (const { name, op } of comparisonFuncs) {
+      result = this.replaceCall(result, name, (args) => {
+        if (args.length !== 2) return null;
+        // Convert to component-wise comparison wrapped in parentheses
+        return `(${args[0].trim()} ${op} ${args[1].trim()})`;
       });
     }
 
@@ -2461,6 +2659,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       varTypes.set(varName, varType);
     }
 
+    // Also track parameter types from function signatures
+    const paramPattern = /(\w+)_in\s*:\s*(vec[234](?:<f32>)?)/g;
+    while ((match = paramPattern.exec(code)) !== null) {
+      const varName = match[1];
+      let varType = match[2];
+      if (varType.includes('<')) {
+        varType = varType.split('<')[0];
+      }
+      varTypes.set(varName, varType);
+    }
+
     let result = code;
     let safety = 0;
     const maxIterations = 1000;
@@ -2492,38 +2701,50 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         return false;
       };
 
-      // Detect vector type from third argument (x in smoothstep(edge0, edge1, x))
-      let vecType: string | null = null;
-      const trimmedArg3 = arg3.trim();
+      // Helper function to detect vector type from an expression
+      const detectVectorType = (expr: string): string | null => {
+        const trimmed = expr.trim();
 
-      // Check if expression CONTAINS a vector constructor
-      if (trimmedArg3.includes('vec4<f32>') || trimmedArg3.match(/\bvec4\s*\(/)) {
-        vecType = 'vec4';
-      } else if (trimmedArg3.includes('vec3<f32>') || trimmedArg3.match(/\bvec3\s*\(/)) {
-        vecType = 'vec3';
-      } else if (trimmedArg3.includes('vec2<f32>') || trimmedArg3.match(/\bvec2\s*\(/)) {
-        vecType = 'vec2';
-      } else if (/^[a-zA-Z_]\w*$/.test(trimmedArg3)) {
-        // It's a simple variable name - check if we know its type
-        const knownType = varTypes.get(trimmedArg3);
-        if (knownType) {
-          vecType = knownType;
+        // Direct vector constructor
+        if (trimmed.includes('vec4<f32>') || /\bvec4\s*\(/.test(trimmed)) return 'vec4';
+        if (trimmed.includes('vec3<f32>') || /\bvec3\s*\(/.test(trimmed)) return 'vec3';
+        if (trimmed.includes('vec2<f32>') || /\bvec2\s*\(/.test(trimmed)) return 'vec2';
+
+        // Function calls that return vector types
+        // fract(), floor(), ceil() preserve the input type
+        const fractMatch = trimmed.match(/\bfract\s*\((.+)\)$/);
+        if (fractMatch) {
+          return detectVectorType(fractMatch[1]);
         }
-      }
 
-      // Fallback: Check if the third arg is a function call or expression with arithmetic
-      /*
-      // Removed: This is too aggressive and breaks scalar smoothstep expressions
-      if (!vecType) {
-        const startsWithFunctionCall = /^[a-zA-Z_]\w*\s*\(/.test(trimmedArg3);
-        const hasArithmetic = /[*+\-\/]/.test(trimmedArg3);
-
-        if ((startsWithFunctionCall || hasArithmetic) && looksLikeScalar(arg1) && looksLikeScalar(arg2)) {
-          // Assume vec3 for function calls and expressions (common for color operations)
-          vecType = 'vec3';
+        // Simple variable name
+        if (/^[a-zA-Z_]\w*$/.test(trimmed)) {
+          const knownType = varTypes.get(trimmed);
+          if (knownType) return knownType;
         }
-      }
-      */
+
+        // Variable with swizzle - check base variable
+        const swizzleMatch = trimmed.match(/^([a-zA-Z_]\w*)\.([xyzwrgba]{1,4})$/);
+        if (swizzleMatch) {
+          const swizzleLen = swizzleMatch[2].length;
+          if (swizzleLen === 2) return 'vec2';
+          if (swizzleLen === 3) return 'vec3';
+          if (swizzleLen === 4) return 'vec4';
+        }
+
+        // For expressions like (a - b), try to detect from sub-expressions
+        // This is a simplified heuristic
+        const cleanExpr = trimmed.replace(/^\(|\)$/g, '');
+        const parts = cleanExpr.split(/[+\-*/]/);
+        for (const part of parts) {
+          const partType = detectVectorType(part.trim());
+          if (partType) return partType;
+        }
+
+        return null;
+      };
+
+      const vecType = detectVectorType(arg3);
 
       if (vecType && looksLikeScalar(arg1) && looksLikeScalar(arg2)) {
         // Need to wrap scalars in vector constructors
@@ -2940,8 +3161,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       'texcoord',
       'v_texcoord',
       'vTexCoord',
-      'v_uv',
-      'vUv',
       'input\\.uv'  // Also match input.uv (escaped dot for regex)
     ];
 
@@ -3013,7 +3232,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
       result = result.replace(funcRegex, (match, params, returnType) => {
         const trimmedParams = params.trim();
-        const newParams = trimmedParams ? `${trimmedParams}, uv: vec2<f32>` : 'uv: vec2<f32>';
+        const newParams = trimmedParams ? `${trimmedParams}, _isf_injected_uv: vec2<f32>` : '_isf_injected_uv: vec2<f32>';
         return `fn ${func.name}(${newParams})${returnType || ''} {`;
       });
 
@@ -3081,13 +3300,28 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
         let funcBody = result.slice(bodyStart, bodyEnd + 1);
 
-        // Replace coordinate patterns with 'uv'
+        // Replace coordinate patterns with '_isf_injected_uv'
         for (const pattern of coordinatePatterns) {
           // Special handling for input.uv pattern (has a dot, no word boundary)
           if (pattern === 'input\\.uv') {
-            funcBody = funcBody.replace(/input\.uv/g, 'uv');
+            // Still apply declaration check for input.uv (rare but possible after prior replacements)
+            funcBody = funcBody.replace(/input\.uv/g, (match, offset, string) => {
+              const prefix = string.slice(0, offset).trimEnd();
+              if (prefix.endsWith('var') || prefix.endsWith('let') || prefix.endsWith('const') || prefix.endsWith(':')) {
+                return match;
+              }
+              return '_isf_injected_uv';
+            });
           } else {
-            funcBody = funcBody.replace(new RegExp(`\\b${pattern}\\b`, 'g'), 'uv');
+            funcBody = funcBody.replace(new RegExp(`\\b${pattern}\\b`, 'g'), (match, offset, string) => {
+              // Check characters before match to avoid replacing variable declarations
+              // Look for "var ", "let ", "const " or ":" preceding the match (ignoring whitespace)
+              const prefix = string.slice(0, offset).trimEnd();
+              if (prefix.endsWith('var') || prefix.endsWith('let') || prefix.endsWith('const') || prefix.endsWith(':')) {
+                return match;
+              }
+              return '_isf_injected_uv';
+            });
           }
         }
 

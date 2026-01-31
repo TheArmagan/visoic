@@ -2,6 +2,44 @@ import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
+import net from 'net';
+
+// Shader test suite types (shared with renderer)
+interface ShaderTestResult {
+  shaderId: string;
+  shaderName: string;
+  category: string;
+  status: 'success' | 'error' | 'fixed' | 'skipped';
+  error?: string;
+  errorLine?: number;
+  errorColumn?: number;
+  fixAttempts?: number;
+  fixApplied?: string;
+  wgslOutput?: string;
+  duration: number;
+  timestamp: number;
+}
+
+interface ShaderTestProgress {
+  current: number;
+  total: number;
+  currentShaderId: string;
+  currentShaderName: string;
+  status: 'testing' | 'fixing' | 'complete';
+  lastResult?: ShaderTestResult;
+}
+
+interface ShaderTestSuiteResult {
+  totalShaders: number;
+  passed: number;
+  failed: number;
+  fixed: number;
+  skipped: number;
+  results: ShaderTestResult[];
+  startTime: number;
+  endTime: number;
+  duration: number;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -258,6 +296,192 @@ function createWindow() {
       console.error(`Failed to read shader ${id}:`, error);
       return null;
     }
+  });
+
+  // ==========================================
+  // Shader Test Suite IPC API
+  // ==========================================
+
+  // Store for test state
+  let shaderTestState: {
+    isRunning: boolean;
+    progress: ShaderTestProgress | null;
+    results: ShaderTestResult[];
+    lastErrors: Map<string, { error: string; wgsl: string }>;
+  } = {
+    isRunning: false,
+    progress: null,
+    results: [],
+    lastErrors: new Map(),
+  };
+
+  // CLI server for external test control
+  let cliServer: net.Server | null = null;
+  let cliClients: Set<net.Socket> = new Set();
+  const CLI_PORT = 19847; // Visoic shader test CLI port
+
+  function broadcastToCliClients(message: object) {
+    const data = JSON.stringify(message) + '\n';
+    for (const client of cliClients) {
+      try {
+        client.write(data);
+      } catch {
+        cliClients.delete(client);
+      }
+    }
+  }
+
+  // Start CLI server
+  function startCliServer() {
+    if (cliServer) return;
+
+    cliServer = net.createServer((socket) => {
+      console.log('[ShaderTestCLI] Client connected');
+      cliClients.add(socket);
+
+      // Send current state to new client
+      socket.write(JSON.stringify({
+        type: 'connected',
+        payload: {
+          isRunning: shaderTestState.isRunning,
+          progress: shaderTestState.progress,
+        }
+      }) + '\n');
+
+      let buffer = '';
+      socket.on('data', (data) => {
+        buffer += data.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const message = JSON.parse(line);
+            handleCliMessage(socket, message);
+          } catch (e) {
+            console.error('[ShaderTestCLI] Invalid message:', line);
+          }
+        }
+      });
+
+      socket.on('close', () => {
+        console.log('[ShaderTestCLI] Client disconnected');
+        cliClients.delete(socket);
+      });
+
+      socket.on('error', (err) => {
+        console.error('[ShaderTestCLI] Socket error:', err);
+        cliClients.delete(socket);
+      });
+    });
+
+    cliServer.listen(CLI_PORT, '127.0.0.1', () => {
+      console.log(`[ShaderTestCLI] Server listening on port ${CLI_PORT}`);
+    });
+
+    cliServer.on('error', (err) => {
+      console.error('[ShaderTestCLI] Server error:', err);
+    });
+  }
+
+  function handleCliMessage(socket: net.Socket, message: { type: string; payload?: unknown }) {
+    switch (message.type) {
+      case 'start-test':
+        mainWindow.webContents.send('shader-test:start', message.payload);
+        break;
+      case 'stop-test':
+        mainWindow.webContents.send('shader-test:stop');
+        break;
+      case 'get-status':
+        socket.write(JSON.stringify({
+          type: 'status',
+          payload: {
+            isRunning: shaderTestState.isRunning,
+            progress: shaderTestState.progress,
+          }
+        }) + '\n');
+        break;
+      case 'get-results':
+        socket.write(JSON.stringify({
+          type: 'results',
+          payload: shaderTestState.results,
+        }) + '\n');
+        break;
+      case 'get-last-error':
+        const errorData = shaderTestState.lastErrors.get((message.payload as { shaderId: string })?.shaderId || '');
+        socket.write(JSON.stringify({
+          type: 'last-error',
+          payload: errorData || null,
+        }) + '\n');
+        break;
+      case 'retry-shader':
+        mainWindow.webContents.send('shader-test:retry', message.payload);
+        break;
+      case 'reload-window':
+        mainWindow.webContents.reload();
+        socket.write(JSON.stringify({ type: 'reloaded' }) + '\n');
+        break;
+      case 'navigate-test-page':
+        mainWindow.webContents.send('shader-test:navigate');
+        break;
+    }
+  }
+
+  // Start CLI server when app is ready
+  startCliServer();
+
+  // IPC: Start shader test
+  ipcMain.on('shader-test:start-request', (_event, config: { shaderIds?: string[]; categories?: string[] }) => {
+    mainWindow.webContents.send('shader-test:start', config);
+  });
+
+  // IPC: Receive test progress from renderer
+  ipcMain.on('shader-test:progress', (_event, progress: ShaderTestProgress) => {
+    shaderTestState.isRunning = progress.status !== 'complete';
+    shaderTestState.progress = progress;
+    broadcastToCliClients({ type: 'progress', payload: progress });
+  });
+
+  // IPC: Receive test result from renderer
+  ipcMain.on('shader-test:result', (_event, result: ShaderTestResult) => {
+    shaderTestState.results.push(result);
+    if (result.error && result.wgslOutput) {
+      shaderTestState.lastErrors.set(result.shaderId, {
+        error: result.error,
+        wgsl: result.wgslOutput,
+      });
+    }
+    broadcastToCliClients({ type: 'result', payload: result });
+  });
+
+  // IPC: Receive test complete from renderer
+  ipcMain.on('shader-test:complete', (_event, suiteResult: ShaderTestSuiteResult) => {
+    shaderTestState.isRunning = false;
+    shaderTestState.progress = null;
+    broadcastToCliClients({ type: 'complete', payload: suiteResult });
+    console.log(`[ShaderTest] Complete: ${suiteResult.passed}/${suiteResult.totalShaders} passed, ${suiteResult.failed} failed, ${suiteResult.fixed} fixed`);
+  });
+
+  // IPC: Get current test state
+  ipcMain.handle('shader-test:get-state', () => {
+    return {
+      isRunning: shaderTestState.isRunning,
+      progress: shaderTestState.progress,
+      results: shaderTestState.results,
+    };
+  });
+
+  // IPC: Clear test results
+  ipcMain.on('shader-test:clear', () => {
+    shaderTestState.results = [];
+    shaderTestState.lastErrors.clear();
+    broadcastToCliClients({ type: 'cleared' });
+  });
+
+  // IPC: Get last error for shader
+  ipcMain.handle('shader-test:get-last-error', (_event, shaderId: string) => {
+    return shaderTestState.lastErrors.get(shaderId) || null;
   });
 }
 

@@ -14,6 +14,10 @@
       name: "Nodes",
       to: "/node-editor",
     },
+    {
+      name: "Shader Test",
+      to: "/shader-test",
+    },
   ];
 
   onMount(() => {
