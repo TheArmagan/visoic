@@ -1,1 +1,0 @@
-shader-test-cli kullanarak şuanda var olan shader sıkıntılarını BİRER BİRER çöz. compilerı uygun hale getirmen gerekecek sorunları çözmek için THINK IN ENGLISH LANGUAGE AND DO WHATEVER YOU NEED TO DO TO FIX ALL ISSUS ONE BY ONE

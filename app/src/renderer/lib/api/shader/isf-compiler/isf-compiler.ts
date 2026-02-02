@@ -1182,61 +1182,80 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   private preprocessGLSLCommaDeclarations(code: string): string {
     // Handle: float a, b, c;  =>  float a; float b; float c;
     // Handle: float a = 1.0, b = 2.0;  =>  float a = 1.0; float b = 2.0;
-    // Be careful to handle expressions with parentheses like min(a, b)
 
-    const types = ['float', 'int', 'bool', 'vec2', 'vec3', 'vec4', 'ivec2', 'ivec3', 'ivec4', 'uvec2', 'uvec3', 'uvec4', 'mat2', 'mat3', 'mat4'];
-    let result = code;
+    const types = new Set(['float', 'int', 'bool', 'vec2', 'vec3', 'vec4', 'ivec2', 'ivec3', 'ivec4', 'uvec2', 'uvec3', 'uvec4', 'mat2', 'mat3', 'mat4']);
+    let result = '';
+    let i = 0;
 
-    // Process line by line to avoid cross-line issues
-    const lines = result.split('\n');
-    const processedLines: string[] = [];
+    while (i < code.length) {
+      // Find type keyword
+      const substring = code.substring(i);
+      const match = substring.match(/^(float|int|bool|vec[234]|ivec[234]|uvec[234]|mat[234])\b/);
 
-    for (const line of lines) {
-      let processed = line;
+      if (match) {
+        const type = match[0];
+        // Check if previous char is not identifier part (to ensure whole word)
+        const prevChar = i > 0 ? code[i - 1] : ' ';
+        if (!/[a-zA-Z0-9_]/.test(prevChar)) {
+          // Look ahead for semicolon
+          let j = i + type.length;
+          while (j < code.length && /\s/.test(code[j])) j++;
 
-      for (const type of types) {
-        // Pattern: type name, name2, ...;  or  type name = val, name2 = val2, ...;
-        // The key is: commas between variable names, not inside function calls
-        const declMatch = line.match(new RegExp(`^(\\s*)${type}\\s+(.+);(\\s*//.*)?$`));
+          // Start scanning variables
+          let declStart = j;
+          let scanPos = j;
+          let depth = 0;
+          let hasComma = false;
 
-        if (!declMatch) continue;
+          while (scanPos < code.length) {
+            const ch = code[scanPos];
+            if (ch === '(') depth++;
+            else if (ch === ')') depth--;
+            else if (ch === '{' || ch === '}') break; // Should not happen in decl
+            else if (ch === ';' && depth === 0) {
+              break; // End of decl
+            }
+            else if (ch === ',' && depth === 0) {
+              hasComma = true;
+            }
+            scanPos++;
+          }
 
-        const indent = declMatch[1];
-        const varsStr = declMatch[2];
-        const comment = declMatch[3] || '';
+          if (hasComma && scanPos < code.length && code[scanPos] === ';') {
+            // Found comma separated declaration
+            const declContent = code.slice(declStart, scanPos);
 
-        // Split by comma at depth 0 (not inside parens)
-        const vars: string[] = [];
-        let current = '';
-        let depth = 0;
+            // Split vars
+            const vars: string[] = [];
+            let currentVar = '';
+            let d = 0;
+            for (const ch of declContent) {
+              if (ch === '(') d++;
+              else if (ch === ')') d--;
+              else if (ch === ',' && d === 0) {
+                vars.push(currentVar.trim());
+                currentVar = '';
+                continue;
+              }
+              currentVar += ch;
+            }
+            if (currentVar.trim()) vars.push(currentVar.trim());
 
-        for (const ch of varsStr) {
-          if (ch === '(' || ch === '[') depth++;
-          else if (ch === ')' || ch === ']') depth--;
-          else if (ch === ',' && depth === 0) {
-            vars.push(current.trim());
-            current = '';
+            // Reconstruct
+            result += code.slice(i, i + type.length); // type
+            // Skip
+            result += ' ' + vars.join(`; ${type} `) + ';';
+            i = scanPos + 1;
             continue;
           }
-          current += ch;
         }
-        if (current.trim()) vars.push(current.trim());
-
-        // Only process if we have multiple vars (true comma-separated declaration)
-        if (vars.length > 1) {
-          processed = vars.map((v, i) => {
-            const lineComment = (i === vars.length - 1) ? comment : '';
-            return `${indent}${type} ${v};${lineComment}`;
-          }).join('\n');
-        }
-
-        break; // Only process one type per line
       }
 
-      processedLines.push(processed);
+      result += code[i];
+      i++;
     }
 
-    return processedLines.join('\n');
+    return result;
   }
 
   private splitCommaVariableDeclarations(code: string): string {
@@ -1829,50 +1848,78 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private extractStatement(code: string, start: number): { text: string; end: number } | null {
+    // Skip start whitespace
     let i = start;
-    let text = '';
-    let braceDepth = 0;
-    let parenDepth = 0;
+    while (i < code.length && /\s/.test(code[i])) i++;
 
-    while (i < code.length) {
-      const char = code[i];
+    if (i >= code.length) return null;
 
-      if (char === '(') {
-        parenDepth++;
-        text += char;
-        i++;
-      } else if (char === ')') {
-        parenDepth--;
-        text += char;
-        i++;
-      } else if (char === '{') {
-        if (braceDepth === 0 && parenDepth === 0) {
-          // Encountered a brace at statement level - stop here
-          break;
+    const statementStart = i;
+
+    // Block statement { ... }
+    if (code[i] === '{') {
+      let depth = 0;
+      while (i < code.length) {
+        if (code[i] === '{') depth++;
+        else if (code[i] === '}') {
+          depth--;
+          if (depth === 0) {
+            i++;
+            return { text: code.slice(statementStart, i), end: i };
+          }
         }
-        braceDepth++;
-        text += char;
-        i++;
-      } else if (char === '}') {
-        if (braceDepth === 0) {
-          // End of containing block
-          break;
-        }
-        braceDepth--;
-        text += char;
-        i++;
-      } else if (char === ';' && braceDepth === 0 && parenDepth === 0) {
-        // End of statement
-        text += char;
-        i++;
-        break;
-      } else {
-        text += char;
         i++;
       }
+      return { text: code.slice(statementStart), end: i };
     }
 
-    return text.trim().length > 0 ? { text: text.trim(), end: i } : null;
+    // Control flow statement (if, for, while, switch)
+    // Extract keyword
+    const substring = code.substring(i);
+    const match = substring.match(/^(if|for|while|switch)\b/);
+    if (match) {
+      i += match[0].length;
+      // Skip whitespace
+      while (i < code.length && /\s/.test(code[i])) i++;
+
+      // Extract condition (...)
+      if (code[i] === '(') {
+        let depth = 0;
+        while (i < code.length) {
+          if (code[i] === '(') depth++;
+          else if (code[i] === ')') {
+            depth--;
+            if (depth === 0) {
+              i++;
+              break;
+            }
+          }
+          i++;
+        }
+      }
+
+      // Extract body
+      const body = this.extractStatement(code, i);
+      if (body) {
+        return { text: code.slice(statementStart, body.end), end: body.end };
+      }
+      return { text: code.slice(statementStart, i), end: i };
+    }
+
+    // Regular statement ending with ;
+    while (i < code.length) {
+      if (code[i] === ';') {
+        i++;
+        return { text: code.slice(statementStart, i), end: i };
+      }
+      if (code[i] === '}') {
+        // Stop at block end (don't consume })
+        break;
+      }
+      i++;
+    }
+
+    return { text: code.slice(statementStart, i), end: i };
   }
 
   private fixForLoopBraces(code: string): string {
@@ -2798,20 +2845,27 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private inferVectorType(expr: string): string | null {
-    // If expression contains scalar reduction functions, ignore swizzles as they might be arguments
-    // Only trust explicit constructors
-    const hasScalarFunc = /\b(dot|length|distance|determinant)\s*\(/.test(expr);
+    // Scan for types at top-level (paren depth 0) to avoid false positives from arguments
+    let depth = 0;
+    let topLevel = '';
 
-    if (hasScalarFunc) {
-      if (/vec4/.test(expr)) return 'vec4<f32>';
-      if (/vec3/.test(expr)) return 'vec3<f32>';
-      if (/vec2/.test(expr)) return 'vec2<f32>';
-      return null;
+    // Check for scalar functions at top level implies scalar/unknown result
+    // (We trust these return scalars or handle their own vector logic)
+    if (/^\s*(dot|length|distance|determinant)\s*\(/.test(expr)) return null;
+
+    // Scan string respecting parentheses
+    for (const char of expr) {
+      if (char === '(') depth++;
+      else if (char === ')') depth--;
+      else if (depth === 0) topLevel += char;
     }
 
-    if (/vec4|\.(xyzw|rgba|stpq)\b/.test(expr)) return 'vec4<f32>';
-    if (/vec3|\.(xyz|rgb|stp)\b/.test(expr)) return 'vec3<f32>';
-    if (/vec2|\.(xy|rg|zw|st)\b/.test(expr)) return 'vec2<f32>';
+    // Now check topLevel text for hints
+    // Matches constructors (vec2) or swizzles (.xy) appearing at the top level
+    if (/vec4|\.(xyzw|rgba|stpq)\b/.test(topLevel)) return 'vec4<f32>';
+    if (/vec3|\.(xyz|rgb|stp)\b/.test(topLevel)) return 'vec3<f32>';
+    if (/vec2|\.(xy|rg|zw|st)\b/.test(topLevel)) return 'vec2<f32>';
+
     return null;
   }
 
@@ -3090,50 +3144,111 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
   private fixModuleScopeVarDeclarations(code: string): string {
     // Module-scope var declarations need <private> address space
-    // Find var declarations outside of functions
+    // Scan carefully using character loop to handle multi-line declarations
 
-    const lines = code.split('\n');
-    const result: string[] = [];
-    let inFunction = false;
+    let result = '';
+    let i = 0;
     let braceDepth = 0;
+    const movedVars = new Set<string>();
 
-    for (const line of lines) {
-      // Track function scope
-      const fnMatch = line.match(/\bfn\s+\w+/);
-      if (fnMatch) inFunction = true;
+    while (i < code.length) {
+      const char = code[i];
 
-      for (const char of line) {
-        if (char === '{') braceDepth++;
-        if (char === '}') braceDepth--;
+      if (char === '{') {
+        braceDepth++;
+        result += char;
+        i++;
+        continue;
+      }
+      if (char === '}') {
+        braceDepth--;
+        result += char;
+        i++;
+        continue;
       }
 
-      if (braceDepth === 0) inFunction = false;
+      // Check for 'var ' at global scope
+      if (braceDepth === 0) {
+        // Look ahead for var decl
+        // We match 'var' followed by space and identifier and colon
+        if (code.startsWith('var', i) && /\s/.test(code[i + 3])) {
+          // Found potential var
+          const rest = code.substring(i);
+          const match = rest.match(/^var\s+(\w+)\s*:/);
 
-      // Fix module-scope var declarations
-      if (!inFunction && braceDepth === 0) {
-        const varMatch = line.match(/^(\s*)var\s+(\w+)\s*:\s*(.+?)\s*(=\s*(.+?))?\s*;/);
-        if (varMatch && !line.includes('<private>') && !line.includes('<uniform>') && !line.includes('<storage>')) {
-          const [, indent, name, type, initPart, initValue] = varMatch;
+          if (match) {
+            const name = match[1];
 
-          // If initialized with uniforms, defer initialization to main
-          if (initPart && initValue && initValue.includes('uniforms.')) {
-            // Remove initialization, add to varsToInitInMain
-            const newLine = `${indent}var<private> ${name}: ${type};`;
-            result.push(newLine);
-            this.varsToInitInMain.push({ name, value: initValue.trim() });
-            continue;
+            // Scan until semicolon to get full declaration
+            let scanPos = i;
+            let pDepth = 0;
+            let declEnd = -1;
+
+            while (scanPos < code.length) {
+              const c = code[scanPos];
+              if (c === '(') pDepth++;
+              else if (c === ')') pDepth--;
+              else if (c === ';' && pDepth === 0) {
+                declEnd = scanPos + 1; // Include semicolon
+                break;
+              }
+              scanPos++;
+            }
+
+            if (declEnd !== -1) {
+              const fullDecl = code.slice(i, declEnd);
+
+              // Check if it already has address space
+              if (fullDecl.includes('<private>') || fullDecl.includes('<uniform>') || fullDecl.includes('<storage>')) {
+                result += fullDecl;
+                i = declEnd;
+                continue;
+              }
+
+              // Parse details
+              const declMatch = fullDecl.match(/var\s+(\w+)\s*:\s*([^=;]+)(?:=\s*([\s\S]+?))?;/);
+              if (declMatch) {
+                const type = declMatch[2].trim();
+                const initValue = declMatch[3];
+
+                let needsMove = false;
+                if (initValue) {
+                  if (initValue.includes('uniforms.')) {
+                    needsMove = true;
+                  } else {
+                    const tokens = initValue.match(/\b[a-zA-Z_]\w*\b/g) || [];
+                    for (const token of tokens) {
+                      if (movedVars.has(token)) {
+                        needsMove = true;
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                if (needsMove) {
+                  movedVars.add(name);
+                  result += `var<private> ${name}: ${type};\n`;
+                  this.varsToInitInMain.push({ name, value: initValue!.trim() });
+                } else {
+                  // Make private
+                  const newDecl = fullDecl.replace(/^var\s+(\w+)/, 'var<private> $1');
+                  result += newDecl;
+                }
+
+                i = declEnd;
+                continue;
+              }
+            }
           }
-
-          const newLine = line.replace(/var\s+(\w+)\s*:/, `var<private> ${name}:`);
-          result.push(newLine);
-          continue;
         }
       }
 
-      result.push(line);
+      result += char;
+      i++;
     }
 
-    return result.join('\n');
+    return result;
   }
 
   private ensureFsMain(code: string, initVarsCode: string): string {
