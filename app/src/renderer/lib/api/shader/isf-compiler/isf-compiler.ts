@@ -157,6 +157,7 @@ const WGSL_TYPE_INFO: Record<string, { size: number; align: number }> = {
 };
 
 // Standard ISF globals that we inject
+// NOTE: Order MUST match legacy parser for uniform buffer compatibility
 const ISF_STANDARD_UNIFORMS: Array<{ name: string; wgslType: string }> = [
   { name: "time", wgslType: "f32" },
   { name: "timeDelta", wgslType: "f32" },
@@ -643,7 +644,8 @@ export class ISFToWGSLCompiler {
     }
 
     // Process user inputs
-    let textureBindingIndex = 0;
+    // Start texture bindings at 1 (0 is reserved for uniform buffer)
+    let textureBindingIndex = 1;
 
     for (const input of inputs) {
       const inputType = input.TYPE.toLowerCase();
@@ -711,6 +713,11 @@ export class ISFToWGSLCompiler {
           textureBinding: textureBindingIndex,
           samplerBinding: textureBindingIndex + 1,
         });
+        if (pass.TARGET) {
+          this.textureNames.add(pass.TARGET);
+        } else {
+          this.textureNames.add(defaultName);
+        }
         textureBindingIndex += 2;
       }
     }
@@ -850,14 +857,66 @@ export class ISFToWGSLCompiler {
     wgsl = wgsl.replace(/\(inversesqrt\)\s*\(/g, 'inverseSqrt(');
     wgsl = wgsl.replace(/\binversesqrt\s*\(/g, 'inverseSqrt(');
 
+    // Collect specific types from current code state to handle ++/-- correctly (float vs int)
+    const currentTypes = this.collectVarTypesFromCode(wgsl);
+
     // ++/-- operators not supported in WGSL
-    wgsl = wgsl.replace(/\b(\w+)\s*\+\+/g, '$1 = $1 + 1');
-    wgsl = wgsl.replace(/\b(\w+)\s*--/g, '$1 = $1 - 1');
-    wgsl = wgsl.replace(/\+\+\s*(\w+)\b/g, '$1 = $1 + 1');
-    wgsl = wgsl.replace(/--\s*(\w+)\b/g, '$1 = $1 - 1');
+    // Heuristic: If it looks like a component access (.x, .y, etc) or variable is float, treat as float increment (+ 1.0).
+    // Otherwise treat as int increment (+ 1).
+    // We scan backwards to find the nearest variable declaration to handle shadowing/scope (e.g. i reuse).
+    const incRep = (match: string, v: string, offset: number, fullCode: string) => {
+      const base = v.split('.')[0];
+
+      // Scan backwards for declaration of baseVar in the code preceeding this usage
+      const header = fullCode.slice(0, offset);
+
+      // Match declarations: check for var/let/const baseVar : type
+      // We use \b boundary to avoid partial matches
+      const regex = new RegExp(`\\b(?:var|let|const)\\s+${base}\\b\\s*:\\s*([\\w<>]+)`, 'g');
+      let type = 'unknown';
+      let m;
+      while ((m = regex.exec(header)) !== null) {
+        type = m[1];
+      }
+
+      // Fallback to global map if not found (e.g. if decl is complex or outside regex grasp)
+      if (type === 'unknown') {
+        type = currentTypes.get(base) || 'unknown';
+      }
+
+      const isFloat = /\.[xyzwrgba]$/.test(v) || type === 'f32' || type.startsWith('vec') || type === 'float';
+      return isFloat ? `${v} = ${v} + 1.0` : `${v} = ${v} + 1`;
+    };
+
+    // Same logic for decrement
+    const decRep = (match: string, v: string, offset: number, fullCode: string) => {
+      const base = v.split('.')[0];
+      const header = fullCode.slice(0, offset);
+      const regex = new RegExp(`\\b(?:var|let|const)\\s+${base}\\b\\s*:\\s*([\\w<>]+)`, 'g');
+      let type = 'unknown';
+      let m;
+      while ((m = regex.exec(header)) !== null) {
+        type = m[1];
+      }
+      if (type === 'unknown') {
+        type = currentTypes.get(base) || 'unknown';
+      }
+      const isFloat = /\.[xyzwrgba]$/.test(v) || type === 'f32' || type.startsWith('vec') || type === 'float';
+      return isFloat ? `${v} = ${v} - 1.0` : `${v} = ${v} - 1`;
+    };
+
+    wgsl = wgsl.replace(/\b(\w+(?:\.\w+)*)\s*\+\+/g, incRep);
+    wgsl = wgsl.replace(/\b(\w+(?:\.\w+)*)\s*--/g, decRep);
+    wgsl = wgsl.replace(/\+\+\s*(\w+(?:\.\w+)*)\b/g, incRep);
+    wgsl = wgsl.replace(/--\s*(\w+(?:\.\w+)*)\b/g, decRep);
 
     // Replace texture sampling calls
     wgsl = this.replaceTextureSamplingCalls(wgsl);
+
+    // Fix function calls that pass texture arguments
+    // Find user-defined functions that take sampler2D (now texture+sampler pair) parameters
+    const userFunctionsWithTextures = this.findFunctionsWithTextureParams(wgsl);
+    wgsl = this.fixTextureFunctionCalls(wgsl, userFunctionsWithTextures);
 
     // Replace ISF image rect variables
     wgsl = this.replaceImageRectVars(wgsl);
@@ -957,7 +1016,12 @@ export class ISFToWGSLCompiler {
     // Rewrite bool casts, mod calls, bitwise ops
     wgsl = this.rewriteBoolCasts(wgsl);
     wgsl = this.fixBoolComparisons(wgsl);
-    wgsl = this.rewriteModCalls(wgsl);
+    // Run mod rewriting multiple times to handle nested mod() calls
+    for (let i = 0; i < 3; i++) {
+      const before = wgsl;
+      wgsl = this.rewriteModCalls(wgsl);
+      if (before === wgsl) break; // No more changes
+    }
     wgsl = this.rewriteBitwiseOps(wgsl);
 
     // Convert ternary operator to select
@@ -1048,7 +1112,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     wgsl = this.fixUnresolvedVariables(wgsl);
     wgsl = this.fixModuleScopeReferences(wgsl);
     wgsl = this.fixBoolComparisons(wgsl);
-    wgsl = this.fixClampScalarVectorMix(wgsl);
+    // wgsl = this.fixClampScalarVectorMix(wgsl);  // Disabled - causing regressions
+    // wgsl = this.fixCannotAssignErrors(wgsl);    // Disabled - too aggressive
+    // wgsl = this.fixFunctionCallCommas(wgsl);    // Disabled - too aggressive
 
     return wgsl;
   }
@@ -1085,6 +1151,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       const match = param.match(/^(?:(in|out|inout)\s+)?(\w+)\s+(\w+)(?:\s*=.*)?$/);
       if (match) {
         const [, qualifier, type, name] = match;
+
+        // Special case: sampler2D/sampler2DRect becomes texture + sampler pair
+        // Use original name for texture, samp_ prefix for sampler
+        if (type === 'sampler2D' || type === 'sampler2DRect') {
+          converted.push(`${name}: texture_2d<f32>`);
+          converted.push(`samp_${name}: sampler`);
+          continue;
+        }
+
         const wgslType = GLSL_TYPE_TO_WGSL[type] || type;
 
         if (qualifier === 'out' || qualifier === 'inout') {
@@ -1098,6 +1173,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         const simpleMatch = param.match(/(\w+)\s+(\w+)/);
         if (simpleMatch) {
           const [, type, name] = simpleMatch;
+
+          // Special case: sampler2D/sampler2DRect becomes texture + sampler pair
+          if (type === 'sampler2D' || type === 'sampler2DRect') {
+            converted.push(`${name}: texture_2d<f32>`);
+            converted.push(`samp_${name}: sampler`);
+            continue;
+          }
+
           const wgslType = GLSL_TYPE_TO_WGSL[type] || type;
           converted.push(`${name}: ${wgslType}`);
         }
@@ -1353,12 +1436,28 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   private replaceTextureSamplingCalls(code: string): string {
     let result = code;
 
+    // Helper to get correct texture and sampler names
+    // Handles both global bindings (tex_name, samp_name) and function parameters (tex, samp_tex)
+    const getTextureSamplerNames = (texName: string): { texVar: string; sampVar: string } => {
+      const safeTex = this.renamedUniforms.get(texName) || texName;
+
+      // Check if this is a global texture binding (in textureNames set)
+      if (this.textureNames.has(texName) || this.textureNames.has(safeTex)) {
+        // This is a global texture binding - use tex_ and samp_ prefixes
+        return { texVar: `tex_${safeTex}`, sampVar: `samp_${safeTex}` };
+      }
+
+      // This is a function parameter - use it directly with samp_ prefix
+      // Function params are like: fn foo(tex: texture_2d<f32>, samp_tex: sampler)
+      return { texVar: texName, sampVar: `samp_${texName}` };
+    };
+
     // IMG_NORM_PIXEL(tex, uv) -> textureSampleLevel(tex_NAME, samp_NAME, uv, 0.0)
     // Need proper parenthesis parsing for nested expressions
     result = this.replaceTextureSamplingCall(result, 'IMG_NORM_PIXEL', (tex, args) => {
       if (args.length >= 2) {
-        const safeTex = this.renamedUniforms.get(tex) || tex;
-        return `textureSampleLevel(tex_${safeTex}, samp_${safeTex}, ${args[1].trim()}, 0.0)`;
+        const { texVar, sampVar } = getTextureSamplerNames(tex);
+        return `textureSampleLevel(${texVar}, ${sampVar}, ${args[1].trim()}, 0.0)`;
       }
       return null;
     });
@@ -1366,44 +1465,44 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // IMG_PIXEL(tex, coord) -> textureLoad(tex_NAME, vec2<i32>(coord), 0)
     result = this.replaceTextureSamplingCall(result, 'IMG_PIXEL', (tex, args) => {
       if (args.length >= 2) {
-        const safeTex = this.renamedUniforms.get(tex) || tex;
-        return `textureLoad(tex_${safeTex}, vec2<i32>(${args[1].trim()}), 0)`;
+        const { texVar } = getTextureSamplerNames(tex);
+        return `textureLoad(${texVar}, vec2<i32>(${args[1].trim()}), 0)`;
       }
       return null;
     });
 
     // IMG_SIZE(tex) -> vec2<f32>(textureDimensions(tex_NAME))
     result = result.replace(/IMG_SIZE\s*\(\s*(\w+)\s*\)/g, (_, tex) => {
-      const safeTex = this.renamedUniforms.get(tex) || tex;
-      return `vec2<f32>(textureDimensions(tex_${safeTex}))`;
+      const { texVar } = getTextureSamplerNames(tex);
+      return `vec2<f32>(textureDimensions(${texVar}))`;
     });
 
     // IMG_THIS_NORM_PIXEL(texName) -> textureSampleLevel(tex_NAME, samp_NAME, input.uv, 0.0)
     // Note: The parameter is a texture NAME, not coordinates
     result = result.replace(/IMG_THIS_NORM_PIXEL\s*\(\s*(\w+)\s*\)/g, (_, tex) => {
-      const safeTex = this.renamedUniforms.get(tex) || tex;
-      return `textureSampleLevel(tex_${safeTex}, samp_${safeTex}, input.uv, 0.0)`;
+      const { texVar, sampVar } = getTextureSamplerNames(tex);
+      return `textureSampleLevel(${texVar}, ${sampVar}, input.uv, 0.0)`;
     });
 
     // IMG_THIS_PIXEL(texName) -> textureSampleLevel(tex_NAME, samp_NAME, input.uv, 0.0)
     // Note: The parameter is a texture NAME, not coordinates
     result = result.replace(/IMG_THIS_PIXEL\s*\(\s*(\w+)\s*\)/g, (_, tex) => {
-      const safeTex = this.renamedUniforms.get(tex) || tex;
-      return `textureSampleLevel(tex_${safeTex}, samp_${safeTex}, input.uv, 0.0)`;
+      const { texVar, sampVar } = getTextureSamplerNames(tex);
+      return `textureSampleLevel(${texVar}, ${sampVar}, input.uv, 0.0)`;
     });
 
     // texture2D(tex, uv) / texture(tex, uv) - need proper parsing for nested expressions
     result = this.replaceTextureSamplingCall(result, 'texture2D', (tex, args) => {
       if (args.length >= 2) {
-        const safeTex = this.renamedUniforms.get(tex) || tex;
-        return `textureSample(tex_${safeTex}, samp_${safeTex}, ${args[1].trim()})`;
+        const { texVar, sampVar } = getTextureSamplerNames(tex);
+        return `textureSample(${texVar}, ${sampVar}, ${args[1].trim()})`;
       }
       return null;
     });
     result = this.replaceTextureSamplingCall(result, 'texture', (tex, args) => {
       if (args.length >= 2) {
-        const safeTex = this.renamedUniforms.get(tex) || tex;
-        return `textureSample(tex_${safeTex}, samp_${safeTex}, ${args[1].trim()})`;
+        const { texVar, sampVar } = getTextureSamplerNames(tex);
+        return `textureSample(${texVar}, ${sampVar}, ${args[1].trim()})`;
       }
       return null;
     });
@@ -1562,9 +1661,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private rewriteModCalls(code: string): string {
-    // mod(x, y) in GLSL is ((x) - (y) * floor((x) / (y)))
-    // WGSL has modulo operator % but it's different for negatives
-    // Need to properly parse nested function calls
+    // WGSL doesn't have mod() function, use our glsl_mod helper
+    // mod(x, y) -> glsl_mod(x, y) for scalars
+    // mod(vec, scalar) -> glsl_mod_vecN(vec, scalar) for vectors
+    // mod(vec, vec) -> glsl_mod_vecN_vecN(vec, vec) for vector-vector
+
+    // First collect variable types from code to make better decisions
+    const varTypes = this.collectVarTypesFromCode(code);
 
     const regex = /\bmod\s*\(/g;
     let result = '';
@@ -1592,8 +1695,32 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (args.length === 2) {
         const x = args[0].trim();
         const y = args[1].trim();
+
+        // Determine types of both arguments
+        const xType = this.getExpressionVectorType(x, varTypes);
+        const yType = this.getExpressionVectorType(y, varTypes);
+
+        let funcName = 'glsl_mod';
+
+        // Both vectors of same type
+        if (xType === 'vec2<f32>' && yType === 'vec2<f32>') {
+          funcName = 'glsl_mod_vec2_vec2';
+        } else if (xType === 'vec3<f32>' && yType === 'vec3<f32>') {
+          funcName = 'glsl_mod_vec3_vec3';
+        } else if (xType === 'vec4<f32>' && yType === 'vec4<f32>') {
+          funcName = 'glsl_mod_vec4_vec4';
+        }
+        // Vector and scalar
+        else if (xType === 'vec2<f32>' && !yType) {
+          funcName = 'glsl_mod_vec2';
+        } else if (xType === 'vec3<f32>' && !yType) {
+          funcName = 'glsl_mod_vec3';
+        } else if (xType === 'vec4<f32>' && !yType) {
+          funcName = 'glsl_mod_vec4';
+        }
+
         result += code.slice(lastIndex, start);
-        result += `((${x}) - (${y}) * floor((${x}) / (${y})))`;
+        result += `${funcName}(${x}, ${y})`;
         lastIndex = parenEnd + 1;
       } else {
         // Not a 2-arg mod call, leave as is
@@ -1626,112 +1753,52 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let result = code;
     let iterations = 0;
-    const maxIterations = 100;
+    const maxIterations = 150;
 
     // Handle nested ternaries by iterating from innermost to outermost
     while (iterations++ < maxIterations) {
-      // Find a ternary expression: condition ? trueVal : falseVal
-      // Need to handle nested parentheses properly
-
       let found = false;
+
+      // Find ? characters that aren't in strings
       for (let i = 0; i < result.length; i++) {
-        if (result[i] === '?') {
-          // Found a ?, now find the condition before it
-          let condEnd = i - 1;
+        if (result[i] !== '?') continue;
 
-          // Skip whitespace before ?
-          while (condEnd >= 0 && /\s/.test(result[condEnd])) condEnd--;
+        // Skip if inside string literal
+        if (this.isInsideString(result, i)) continue;
 
-          // Now find the start of the condition
-          // We need to walk backwards, handling parentheses properly
-          let parenDepth = 0;
-          let condStart = condEnd;
+        // Find condition start by walking backwards
+        let condEnd = i - 1;
+        while (condEnd >= 0 && /\s/.test(result[condEnd])) condEnd--;
 
-          while (condStart > 0) {
-            const char = result[condStart - 1];
+        let condStart = this.findConditionStart(result, condEnd);
+        if (condStart === -1) continue;
 
-            if (char === ')') {
-              parenDepth++;
-            } else if (char === '(') {
-              if (parenDepth > 0) {
-                parenDepth--;
-              } else {
-                break; // Unmatched open paren -> stop
-              }
-            } else if (char === ']' || char === '}') {
-              parenDepth++;
-            } else if (char === '[' || char === '{') {
-              if (parenDepth > 0) {
-                parenDepth--;
-              } else {
-                break;
-              }
-            } else if (parenDepth === 0) {
-              // Stop at statement/expression boundaries
-              // Don't stop at ==, !=, <=, >=, +=, -=, *=, /=
-              const prevChar = result[condStart - 2];
-              if (char === '=' && prevChar !== '!' && prevChar !== '<' && prevChar !== '>' && prevChar !== '=' && prevChar !== '+' && prevChar !== '-' && prevChar !== '*' && prevChar !== '/') break;
-              if (char === ',' || char === ';' || char === '{') break;
-              // Newline check?
-              if (char === '\n') {
-                // Basic heuristic: check if line continuation
-                // (omitted for brevity, assume comma/semicolon catches most)
-              }
-            }
+        // Find true value and colon
+        let trueStart = i + 1;
+        while (trueStart < result.length && /\s/.test(result[trueStart])) trueStart++;
 
-            condStart--;
-          }
+        const colonPos = this.findMatchingColon(result, trueStart);
+        if (colonPos === -1) continue;
 
-          // Skip leading whitespace
-          while (condStart < condEnd && /\s/.test(result[condStart])) condStart++;
+        const trueEnd = colonPos;
 
-          // Now find the true value after ?
-          let trueStart = i + 1;
-          while (trueStart < result.length && /\s/.test(result[trueStart])) trueStart++;
+        // Find false value
+        let falseStart = colonPos + 1;
+        while (falseStart < result.length && /\s/.test(result[falseStart])) falseStart++;
 
-          // Find the : that separates true and false values
-          let colonPos = trueStart;
-          parenDepth = 0;
-          while (colonPos < result.length) {
-            if (result[colonPos] === '(' || result[colonPos] === '[' || result[colonPos] === '{') parenDepth++;
-            if (result[colonPos] === ')' || result[colonPos] === ']' || result[colonPos] === '}') parenDepth--;
-            if (result[colonPos] === ':' && parenDepth === 0) break;
-            if (result[colonPos] === '?' && parenDepth === 0) break; // nested ternary
-            colonPos++;
-          }
+        const falseEnd = this.findTernaryValueEnd(result, falseStart);
+        if (falseEnd === -1) continue;
 
-          if (colonPos >= result.length || result[colonPos] !== ':') continue;
+        const condition = result.slice(condStart, condEnd + 1).trim();
+        const trueVal = result.slice(trueStart, trueEnd).trim();
+        const falseVal = result.slice(falseStart, falseEnd).trim();
 
-          const trueEnd = colonPos;
-
-          // Find the false value after :
-          let falseStart = colonPos + 1;
-          while (falseStart < result.length && /\s/.test(result[falseStart])) falseStart++;
-
-          // Find end of false value (until ; , ) or end of line)
-          let falseEnd = falseStart;
-          parenDepth = 0;
-          while (falseEnd < result.length) {
-            if (result[falseEnd] === '(' || result[falseEnd] === '[' || result[falseEnd] === '{') parenDepth++;
-            if (result[falseEnd] === ')' || result[falseEnd] === ']' || result[falseEnd] === '}') {
-              if (parenDepth === 0) break;
-              parenDepth--;
-            }
-            if (parenDepth === 0 && (result[falseEnd] === ';' || result[falseEnd] === ',' || result[falseEnd] === '\n')) break;
-            falseEnd++;
-          }
-
-          const condition = result.slice(condStart, i).trim();
-          const trueVal = result.slice(trueStart, trueEnd).trim();
-          const falseVal = result.slice(falseStart, falseEnd).trim();
-
-          if (condition && trueVal && falseVal) {
-            const boolCondition = this.ensureBooleanCondition(condition);
-            const replacement = `select(${falseVal}, ${trueVal}, ${boolCondition})`;
-            result = result.slice(0, condStart) + replacement + result.slice(falseEnd);
-            found = true;
-            break;
-          }
+        if (condition && trueVal && falseVal) {
+          const boolCondition = this.ensureBooleanCondition(condition);
+          const replacement = `select(${falseVal}, ${trueVal}, ${boolCondition})`;
+          result = result.slice(0, condStart) + replacement + result.slice(falseEnd);
+          found = true;
+          break;
         }
       }
 
@@ -1739,6 +1806,162 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     return result;
+  }
+
+  private isInsideString(code: string, pos: number): boolean {
+    let inString = false;
+    let stringChar = '';
+    for (let i = 0; i < pos; i++) {
+      const char = code[i];
+      if ((char === '"' || char === "'") && (i === 0 || code[i - 1] !== '\\')) {
+        if (inString && char === stringChar) {
+          inString = false;
+        } else if (!inString) {
+          inString = true;
+          stringChar = char;
+        }
+      }
+    }
+    return inString;
+  }
+
+  private findConditionStart(code: string, condEnd: number): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let pos = condEnd;
+
+    while (pos >= 0) {
+      const char = code[pos];
+      const prevChar = pos > 0 ? code[pos - 1] : '';
+
+      if (char === ')') parenDepth++;
+      else if (char === '(') {
+        if (parenDepth > 0) parenDepth--;
+        else {
+          return pos + 1;
+        }
+      }
+      else if (char === ']') bracketDepth++;
+      else if (char === '[') {
+        if (bracketDepth > 0) bracketDepth--;
+        else return pos + 1;
+      }
+      else if (char === '}') braceDepth++;
+      else if (char === '{') {
+        if (braceDepth > 0) braceDepth--;
+        else return pos + 1;
+      }
+      else if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+        // Check for statement boundaries
+        if (char === ';' || char === ',' || char === '{') return pos + 1;
+
+        // Check for assignment operators (but not comparison operators like ==, !=, <=, >=)
+        // Also check next char to avoid treating == as assignment
+        const nextChar = pos < code.length - 1 ? code[pos + 1] : '';
+        if (char === '=' &&
+          prevChar !== '=' && prevChar !== '!' && prevChar !== '<' && prevChar !== '>' &&
+          prevChar !== '+' && prevChar !== '-' && prevChar !== '*' && prevChar !== '/' && prevChar !== '%' &&
+          nextChar !== '=') {
+          // Skip any whitespace after the '='
+          let startPos = pos + 1;
+          while (startPos < code.length && /\s/.test(code[startPos])) startPos++;
+          return startPos;
+        }
+      }
+
+      pos--;
+    }
+
+    return 0;
+  }
+
+  private findMatchingColon(code: string, start: number): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let pos = start;
+
+    while (pos < code.length) {
+      if (this.isInsideString(code, pos)) {
+        pos++;
+        continue;
+      }
+
+      const char = code[pos];
+
+      if (char === '(') parenDepth++;
+      else if (char === ')') parenDepth--;
+      else if (char === '[') bracketDepth++;
+      else if (char === ']') bracketDepth--;
+      else if (char === '{') braceDepth++;
+      else if (char === '}') braceDepth--;
+      else if (char === '?' && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+        // Nested ternary - need to find its colon first
+        const nestedColon = this.findMatchingColon(code, pos + 1);
+        if (nestedColon !== -1) pos = nestedColon;
+      }
+      else if (char === ':' && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+        // Make sure it's not :: (GLSL doesn't have this but just in case)
+        if (pos + 1 < code.length && code[pos + 1] === ':') {
+          pos++;
+          continue;
+        }
+        return pos;
+      }
+
+      pos++;
+    }
+
+    return -1;
+  }
+
+  private findTernaryValueEnd(code: string, start: number): number {
+    let parenDepth = 0;
+    let bracketDepth = 0;
+    let braceDepth = 0;
+    let pos = start;
+
+    while (pos < code.length) {
+      if (this.isInsideString(code, pos)) {
+        pos++;
+        continue;
+      }
+
+      const char = code[pos];
+
+      if (char === '(') parenDepth++;
+      else if (char === ')') {
+        if (parenDepth > 0) {
+          parenDepth--;
+        } else {
+          return pos; // End of enclosing expression
+        }
+      }
+      else if (char === '[') bracketDepth++;
+      else if (char === ']') {
+        if (bracketDepth > 0) {
+          bracketDepth--;
+        } else {
+          return pos;
+        }
+      }
+      else if (char === '{') braceDepth++;
+      else if (char === '}') {
+        if (braceDepth > 0) {
+          braceDepth--;
+        } else {
+          return pos;
+        }
+      }
+      else if (parenDepth === 0 && bracketDepth === 0 && braceDepth === 0) {
+        if (char === ';' || char === ',' || char === '\n') return pos;
+      }
+
+      pos++;
+    }
+
+    return pos;
   }
 
   private ensureBooleanCondition(condition: string): string {
@@ -2480,74 +2703,87 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private fixClampScalarVectorMix(code: string): string {
+    // Robust handling of clamp/smoothstep/max/min with proper type inference
     const varTypes = this.collectVarTypesFromCode(code);
     const getVectorType = (expr: string): string | null => this.getExpressionVectorType(expr, varTypes);
     const isScalar = (expr: string): boolean => this.isScalarExpression(expr, getVectorType);
 
-    let quickResult = code;
-    const vecDeclPatterns: Array<{ regex: RegExp; vecType: 'vec2<f32>' | 'vec3<f32>' | 'vec4<f32>' }> = [
-      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec2<\w+>/g, vecType: 'vec2<f32>' },
-      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec3<\w+>/g, vecType: 'vec3<f32>' },
-      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec4<\w+>/g, vecType: 'vec4<f32>' },
-    ];
+    const builtins = ['clamp', 'smoothstep', 'max', 'min'];
+    let result = code;
 
-    for (const { regex: declRegex, vecType } of vecDeclPatterns) {
-      let declMatch;
-      while ((declMatch = declRegex.exec(code)) !== null) {
-        const name = declMatch[1];
-        const namePattern = this.escapeRegex(name);
-        const clampVec = new RegExp(`\\bclamp\\s*\\(\\s*${namePattern}\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*\\)`, 'g');
-        quickResult = quickResult.replace(clampVec, (_match, minVal, maxVal) => {
-          return `clamp(${name}, ${vecType}(${minVal}), ${vecType}(${maxVal}))`;
-        });
-      }
-    }
-    for (const [name, type] of varTypes.entries()) {
-      if (!type.startsWith('vec')) continue;
-      const vecType = type;
-      const namePattern = this.escapeRegex(name);
-      const simpleClamp = new RegExp(`\\bclamp\\s*\\(\\s*${namePattern}\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*\\)`, 'g');
-      quickResult = quickResult.replace(simpleClamp, (_match, minVal, maxVal) => {
-        return `clamp(${name}, ${vecType}(${minVal}), ${vecType}(${maxVal}))`;
-      });
-    }
+    for (const funcName of builtins) {
+      // Multi-pass to handle nested calls
+      for (let pass = 0; pass < 3; pass++) {
+        const regex = new RegExp(`\\b${funcName}\\s*\\(`, 'g');
+        let newResult = '';
+        let lastIndex = 0;
+        let match;
+        let changed = false;
 
-    const regex = /\bclamp\s*\(/g;
-    let result = '';
-    let lastIndex = 0;
-    let match;
+        while ((match = regex.exec(result)) !== null) {
+          const start = match.index;
+          if (start < lastIndex) continue;
 
-    while ((match = regex.exec(quickResult)) !== null) {
-      const start = match.index;
-      if (start < lastIndex) continue;
+          const parenStart = start + match[0].length - 1;
+          const parenEnd = this.findMatchingParen(result, parenStart);
+          if (parenEnd === -1) {
+            newResult += result.slice(lastIndex, start + match[0].length);
+            lastIndex = start + match[0].length;
+            continue;
+          }
 
-      const parenStart = start + match[0].length - 1;
-      const parenEnd = this.findMatchingParen(quickResult, parenStart);
-      if (parenEnd === -1) {
-        result += quickResult.slice(lastIndex, start + match[0].length);
-        lastIndex = start + match[0].length;
-        continue;
-      }
+          const argsStr = result.slice(parenStart + 1, parenEnd);
+          const args = this.splitArgs(argsStr);
 
-      const argsStr = quickResult.slice(parenStart + 1, parenEnd);
-      const args = this.splitArgs(argsStr);
-      if (args.length === 3) {
-        const arg0 = args[0].trim();
-        const vecType = getVectorType(arg0);
-        if (vecType && isScalar(args[1]) && isScalar(args[2])) {
-          const replacement = `clamp(${arg0}, ${vecType}(${args[1].trim()}), ${vecType}(${args[2].trim()}))`;
-          result += quickResult.slice(lastIndex, start);
-          result += replacement;
-          lastIndex = parenEnd + 1;
-          continue;
+          // Find vector type among arguments using proper type inference
+          let targetVecType: string | null = null;
+          const argTypes: (string | null)[] = [];
+
+          for (const arg of args) {
+            const trimmed = arg.trim();
+            const vecType = getVectorType(trimmed);
+            argTypes.push(vecType);
+            if (vecType && !targetVecType) {
+              targetVecType = vecType;
+            }
+          }
+
+          // Check if we need promotion
+          let needsPromotion = false;
+          if (targetVecType) {
+            for (let i = 0; i < args.length; i++) {
+              if (!argTypes[i] && isScalar(args[i].trim())) {
+                needsPromotion = true;
+                break;
+              }
+            }
+          }
+
+          if (needsPromotion && targetVecType) {
+            const promotedArgs = args.map((arg, i) => {
+              const trimmed = arg.trim();
+              if (!argTypes[i] && isScalar(trimmed)) {
+                return `${targetVecType}(${trimmed})`;
+              }
+              return trimmed;
+            });
+
+            newResult += result.slice(lastIndex, start);
+            newResult += `${funcName}(${promotedArgs.join(', ')})`;
+            lastIndex = parenEnd + 1;
+            changed = true;
+          } else {
+            newResult += result.slice(lastIndex, parenEnd + 1);
+            lastIndex = parenEnd + 1;
+          }
         }
-      }
 
-      result += quickResult.slice(lastIndex, parenEnd + 1);
-      lastIndex = parenEnd + 1;
+        newResult += result.slice(lastIndex);
+        result = newResult;
+        if (!changed) break; // No more changes, exit early
+      }
     }
 
-    result += quickResult.slice(lastIndex);
     return result;
   }
 
@@ -2558,6 +2794,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     while ((match = declRegex.exec(code)) !== null) {
       varTypes.set(match[2], match[3]);
     }
+
+    // Capture function parameters
+    const fnRegex = /fn\s+\w+\s*\(([^)]*)\)/g;
+    while ((match = fnRegex.exec(code)) !== null) {
+      const argsStr = match[1];
+      if (!argsStr.trim()) continue;
+      const args = argsStr.split(',');
+      for (const arg of args) {
+        const parts = arg.split(':');
+        if (parts.length === 2) {
+          varTypes.set(parts[0].trim(), parts[1].trim());
+        }
+      }
+    }
     return varTypes;
   }
 
@@ -2567,47 +2817,82 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     const normalized = trimmed.replace(/^[\s\(\+\-]+/, '');
 
-    // Single-component swizzles are scalar
-    if (/\.(x|y|z|w|r|g|b|a)\b/.test(trimmed)) return null;
-
+    // Explicit type casts/constructors
     if (normalized.startsWith('vec2<')) return 'vec2<f32>';
     if (normalized.startsWith('vec3<')) return 'vec3<f32>';
     if (normalized.startsWith('vec4<')) return 'vec4<f32>';
-
     if (trimmed.includes('textureSample') || trimmed.includes('textureLoad')) return 'vec4<f32>';
-    if (trimmed.includes('input.uv') || trimmed.includes('uniforms.renderSize')) return 'vec2<f32>';
-    if (trimmed.includes('uniforms.date')) return 'vec4<f32>';
 
-    const uniformMatch = trimmed.match(/^uniforms\.(\w+)/);
-    if (uniformMatch) {
-      const uniformName = uniformMatch[1];
-      const uniformField = this.uniformFields.find((f) => f.name === uniformName);
-      if (uniformField?.wgslType?.startsWith('vec')) {
-        return uniformField.wgslType;
+    // Parse top level to respect parentheses
+    let depth = 0;
+    let topLevel = '';
+    for (const char of trimmed) {
+      if (char === '(') depth++;
+      else if (char === ')') depth--;
+      else if (depth === 0) topLevel += char;
+    }
+
+    // 1. Check for single component swizzle (implies scalar, so return null)
+    if (/\.([xyzwrgstba])\b/.test(topLevel)) return null;
+
+    // 2. Check for vector swizzles
+    if (/\.([xyzwrgstba]{2,4})\b/.test(topLevel)) {
+      if (/\.([xyzwrgstba]{2})\b/.test(topLevel)) return 'vec2<f32>';
+      if (/\.([xyzwrgstba]{3})\b/.test(topLevel)) return 'vec3<f32>';
+      return 'vec4<f32>';
+    }
+
+    // 3. Check for specific keywords in top level (unswizzled)
+    if (/\binput\.uv\b(?![\s]*\.)/.test(topLevel)) return 'vec2<f32>';
+    if (/\buniforms\.renderSize\b(?![\s]*\.)/.test(topLevel)) return 'vec2<f32>';
+    if (/\buniforms\.date\b(?![\s]*\.)/.test(topLevel)) return 'vec4<f32>';
+
+    // 4. Check for variable usage in top level
+    const words = topLevel.match(/\b[a-zA-Z_]\w*\b/g);
+    if (words) {
+      for (const word of words) {
+        // Check local vars
+        const type = varTypes.get(word);
+        if (type && type.startsWith('vec')) {
+          const unswizzledRegex = new RegExp(`\\b${word}\\b(?!\\s*\\.)`);
+          if (unswizzledRegex.test(topLevel)) return type;
+        }
+
+        // Check uniforms (via uniforms.VAR)
+        const uniformMatch = topLevel.match(new RegExp(`uniforms\\.(${word})\\b(?!\\s*\\.)`));
+        if (uniformMatch) {
+          const uniformName = uniformMatch[1];
+          const uniformField = this.uniformFields.find((f) => f.name === uniformName);
+          if (uniformField?.wgslType?.startsWith('vec')) return uniformField.wgslType;
+        }
       }
     }
 
-    if (/^[a-zA-Z_]\w*$/.test(trimmed)) {
-      const known = varTypes.get(trimmed);
-      if (known && known.startsWith('vec')) return known;
-    }
+    // 5. Check for component-wise built-in function calls
+    // If expr is "func(...)" and func is component-wise, check arguments.
+    // This handles cases like fract(vector_expr) where top-level analysis sees only "fract"
+    const funcMatch = normalized.match(/^(\w+)\s*\(/);
+    if (funcMatch) {
+      const funcName = funcMatch[1];
+      // Functions that return vector if arg0 is vector
+      const preservables = new Set([
+        'abs', 'ceil', 'floor', 'fract', 'sign', 'sqrt', 'inversesqrt',
+        'exp', 'exp2', 'log', 'log2',
+        'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh', 'cosh', 'tanh',
+        'glsl_mod', 'pow', 'min', 'max', 'clamp', 'mix', 'step', 'smoothstep',
+        'faceForward', 'reflect', 'refract'
+      ]);
 
-    // If scalar func present, skip variable scan to avoid false positives (e.g. dot(v,v))
-    const hasScalarFunc = /\b(dot|length|distance|determinant)\s*\(/.test(trimmed);
+      if (preservables.has(funcName)) {
+        const parenStart = normalized.indexOf('(');
+        const parenEnd = this.findMatchingParen(normalized, parenStart);
 
-    // Heuristic: Scan for variables used in expression
-    if (!hasScalarFunc) {
-      const words = trimmed.match(/\b[a-zA-Z_]\w*\b/g);
-      if (words) {
-        for (const word of words) {
-          const type = varTypes.get(word);
-          if (type && type.startsWith('vec')) {
-            // Check if it's swizzled in the expression (simplified check)
-            // This prevents x.y from being treated as x (vec).
-            const swizzleRegex = new RegExp(`\\b${word}\\s*\\.`, 'g');
-            if (!swizzleRegex.test(trimmed)) {
-              return type;
-            }
+        if (parenEnd === normalized.length - 1) {
+          const content = normalized.slice(parenStart + 1, parenEnd);
+          const args = this.splitArgs(content);
+          if (args.length > 0) {
+            const argType = this.getExpressionVectorType(args[0], varTypes);
+            if (argType) return argType;
           }
         }
       }
@@ -2772,7 +3057,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private isLikelyVector(expr: string): boolean {
-    return /vec[234]|\.xyz|\.xy|\.rgb|\.rg/.test(expr);
+    // Check for vector indicators:
+    // - vec2/vec3/vec4 constructor
+    // - swizzle patterns (.xyz, .xy, .rgb, .rg, .xzy, .yx, etc.)
+    // - common vector variables (uv, position, color, normal, etc.)
+    return /vec[234]|\.([xyzwrgba]{2,4})\b/.test(expr) ||
+      /\b(uv|position|color|normal|coord|direction|velocity)\b/.test(expr);
   }
 
   private fixGLSLComparisonFunctions(code: string): string {
@@ -3548,6 +3838,152 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return result;
   }
 
+  /**
+   * Find user-defined functions that have texture parameters (sampler2D in GLSL)
+   * Returns a map of function name -> array of texture parameter base names
+   */
+  private findFunctionsWithTextureParams(code: string): Map<string, string[]> {
+    const functionsWithTextures = new Map<string, string[]>();
+
+    // Match function definitions: fn funcName(param1: type1, param2: type2, ...)
+    const funcPattern = /fn\s+(\w+)\s*\(([^)]*)\)/g;
+    let match;
+
+    while ((match = funcPattern.exec(code)) !== null) {
+      const funcName = match[1];
+      const params = match[2];
+
+      // Skip built-in/special functions
+      if (funcName === 'fs_main' || funcName.startsWith('fract_') || funcName.startsWith('glsl_') ||
+        funcName.startsWith('lessThan_') || funcName.startsWith('greaterThan_')) {
+        continue;
+      }
+
+      // Find texture parameters (NAME: texture_2d<f32>)
+      const paramList = params.split(',').map(p => p.trim()).filter(Boolean);
+      const textureParamNames: string[] = [];
+
+      paramList.forEach((param) => {
+        // Match: NAME: texture_2d<f32> (without tex_ prefix for function params)
+        const texMatch = param.match(/(\w+)\s*:\s*texture_2d/);
+        if (texMatch) {
+          textureParamNames.push(texMatch[1]);
+        }
+      });
+
+      if (textureParamNames.length > 0) {
+        functionsWithTextures.set(funcName, textureParamNames);
+      }
+    }
+
+    return functionsWithTextures;
+  }
+
+  /**
+   * Fix function calls to pass both texture and sampler for texture parameters
+   * Example: lutLookup(lut, size, rgb) -> lutLookup(tex_lut, samp_lut, size, rgb)
+   */
+  private fixTextureFunctionCalls(code: string, functionsWithTextures: Map<string, string[]>): string {
+    let result = code;
+
+    for (const [funcName, textureParamNames] of functionsWithTextures) {
+      // Create a set of texture parameter names for quick lookup
+      const texParamSet = new Set(textureParamNames);
+
+      // Match function calls: funcName(arg1, arg2, ...)
+      const callPattern = new RegExp(`\\b${funcName}\\s*\\(([^)]*)\\)`, 'g');
+
+      result = result.replace(callPattern, (match, argsStr) => {
+        const args = this.splitArgs(argsStr);
+        const newArgs: string[] = [];
+
+        // Track which texture args we've already processed
+        const processedTextures = new Set<number>();
+
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i].trim();
+
+          // Check if this arg is a texture that should be passed to a texture parameter
+          let isTextureArg = false;
+          let texName = '';
+
+          // Check if arg is a known texture name (from INPUTS)
+          if (this.textureNames.has(arg)) {
+            isTextureArg = true;
+            texName = arg;
+          } else if (arg.startsWith('tex_')) {
+            // Already prefixed (global texture)
+            isTextureArg = true;
+            texName = arg.substring(4);
+          }
+
+          // If this is a texture arg and we haven't seen it yet, expand it
+          if (isTextureArg && !processedTextures.has(i)) {
+            newArgs.push(`tex_${texName}`);
+            newArgs.push(`samp_${texName}`);
+            processedTextures.add(i);
+          } else {
+            newArgs.push(arg);
+          }
+        }
+
+        return `${funcName}(${newArgs.join(', ')})`;
+      });
+    }
+
+    return result;
+  }
+
+  private fixCannotAssignErrors(code: string): string {
+    // Fix "cannot assign to value" errors by:
+    // 1. Converting function result assignments to temp variables
+    // 2. Making loop counters and compound assignment targets mutable
+    let result = code;
+
+    // Fix assignments to function results: x.y += foo() -> temp = foo(); x.y += temp
+    const compoundOps = ['\\+=', '-=', '\\*=', '/=', '%='];
+    for (const op of compoundOps) {
+      const regex = new RegExp(`([a-zA-Z_]\\w*(?:\\.\\w+)*)\\s*${op}\\s*([a-zA-Z_]\\w+\\s*\\([^;]*\\))`, 'g');
+      result = result.replace(regex, (match, target, funcCall) => {
+        const tempVar = `_temp_${Math.random().toString(36).substr(2, 8)}`;
+        return `var ${tempVar} = ${funcCall}; ${target} ${op.replace(/\\/g, '')} ${tempVar}`;
+      });
+    }
+
+    // Fix swizzle component assignments that WGSL doesn't support
+    // vec.x = value -> vec = vec3(value, vec.y, vec.z) pattern is too complex
+    // Instead, detect and warn or use temp variable approach
+    const swizzleAssign = /([a-zA-Z_]\w*)\.(x|y|z|w|r|g|b|a)\s*([+\-*\/]?)=\s*([^;]+);/g;
+    result = result.replace(swizzleAssign, (match, vec, comp, op, value) => {
+      if (!op) {
+        // Simple assignment: vec.x = value
+        const compIndex = ['x', 'r'].includes(comp) ? 0 : ['y', 'g'].includes(comp) ? 1 : ['z', 'b'].includes(comp) ? 2 : 3;
+        return `${vec}[${compIndex}] = ${value};`;
+      }
+      // Compound assignment: vec.x += value
+      const compIndex = ['x', 'r'].includes(comp) ? 0 : ['y', 'g'].includes(comp) ? 1 : ['z', 'b'].includes(comp) ? 2 : 3;
+      return `${vec}[${compIndex}] = ${vec}[${compIndex}] ${op} ${value};`;
+    });
+
+    return result;
+  }
+
+  private fixFunctionCallCommas(code: string): string {
+    // Fix "expected ',' for function call" errors
+    // Often caused by missing commas in function calls with complex expressions
+    // This is a conservative fix that handles common patterns
+    let result = code;
+
+    // Fix missing commas before function calls in arguments: func(a func2() -> func(a, func2())
+    // But avoid matching function declarations (fn funcName) and decorators (@fragment fn)
+    result = result.replace(/(?<!@\w+\s)(?<!\bfn\s)\b([a-zA-Z_]\w*)\s+(?!fn\b)([a-zA-Z_]\w*\s*\()/g, '$1, $2');
+
+    // Fix vec constructors with missing commas: vec3(1.0 2.0 3.0) -> vec3(1.0, 2.0, 3.0)
+    result = result.replace(/(vec[234]<[^>]+>\([^)]*)\s+(\d+\.\d+|\d+)\s+(\d+\.\d+|\d+)/g, '$1, $2, $3');
+
+    return result;
+  }
+
   private fixModuleScopeReferences(code: string): string {
     // Fix 'var X cannot be referenced at module-scope' errors
     // These occur when module-scope variables try to use other module variables
@@ -3556,28 +3992,31 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Find all module-scope var declarations that reference other vars
     const lines = result.split('\n');
     const fixedLines: string[] = [];
-    let inFsMain = false;
-    let fsMainBraceIndex = -1;
+    let inFunction = false;  // Track if we're inside ANY function
+    let braceDepth = 0;
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // Check if we're entering fs_main
-      if (line.includes('fn fs_main(')) {
-        inFsMain = true;
-        fixedLines.push(line);
-        continue;
+      // Check if we're entering a function
+      if (line.match(/\bfn\s+\w+\s*\(/)) {
+        inFunction = true;
       }
 
-      // Track opening brace of fs_main
-      if (inFsMain && fsMainBraceIndex === -1 && line.includes('{')) {
-        fsMainBraceIndex = fixedLines.length;
-        fixedLines.push(line);
-        continue;
+      // Track brace depth to know when we exit functions
+      for (const char of line) {
+        if (char === '{') {
+          braceDepth++;
+        } else if (char === '}') {
+          braceDepth--;
+          if (braceDepth === 0) {
+            inFunction = false;
+          }
+        }
       }
 
-      // Check if this is a module-scope var that references other vars
-      if (!inFsMain && line.trim().startsWith('var ') && line.includes('=')) {
+      // Only process module-scope var declarations (not inside any function)
+      if (!inFunction && braceDepth === 0 && line.trim().startsWith('var ') && line.includes('=')) {
         const varMatch = line.match(/var\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+);/);
         if (varMatch) {
           const [, varName, varType, varInit] = varMatch;
@@ -3647,12 +4086,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   private generateUniformStruct(): string {
     const fields: string[] = [];
 
-    // Standard ISF uniforms
+    // Standard ISF uniforms - ORDER MUST MATCH LEGACY PARSER
     fields.push('  time: f32,');
     fields.push('  timeDelta: f32,');
     fields.push('  renderSize: vec2<f32>,');
-    fields.push('  passIndex: i32,');
-    fields.push('  frameIndex: i32,');
+    fields.push('  passIndex: f32,');
+    fields.push('  frameIndex: f32,');
+    fields.push('  layerOpacity: f32,');
+    fields.push('  speed: f32,');
     fields.push('  date: vec4<f32>,');
 
     // User-defined uniforms from INPUTS
@@ -3661,7 +4102,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         fields.push(`  _pad_${field.offset}: f32,`);
       } else {
         // Skip standard uniforms we already added
-        const standardNames = ['time', 'timeDelta', 'renderSize', 'passIndex', 'frameIndex', 'date'];
+        const standardNames = ['time', 'timeDelta', 'renderSize', 'passIndex', 'frameIndex', 'layerOpacity', 'speed', 'date'];
         if (!standardNames.includes(field.name)) {
           fields.push(`  ${field.name}: ${field.wgslType},`);
         }
@@ -3676,16 +4117,16 @@ ${fields.join('\n')}
   private generateTextureBindings(): string {
     const bindings: string[] = [];
 
-    // Generate bindings for input image textures
+    // Generate bindings for input image textures (all in group 0, starting after uniform buffer)
     for (const tex of this.textureBindings) {
-      bindings.push(`@group(1) @binding(${tex.textureBinding}) var tex_${tex.name}: texture_2d<f32>;`);
-      bindings.push(`@group(1) @binding(${tex.samplerBinding}) var samp_${tex.name}: sampler;`);
+      bindings.push(`@group(0) @binding(${tex.textureBinding}) var tex_${tex.name}: texture_2d<f32>;`);
+      bindings.push(`@group(0) @binding(${tex.samplerBinding}) var samp_${tex.name}: sampler;`);
     }
 
     // Generate bindings for pass buffers
     for (const pass of this.passBindings) {
-      bindings.push(`@group(1) @binding(${pass.textureBinding}) var tex_${pass.name}: texture_2d<f32>;`);
-      bindings.push(`@group(1) @binding(${pass.samplerBinding}) var samp_${pass.name}: sampler;`);
+      bindings.push(`@group(0) @binding(${pass.textureBinding}) var tex_${pass.name}: texture_2d<f32>;`);
+      bindings.push(`@group(0) @binding(${pass.samplerBinding}) var samp_${pass.name}: sampler;`);
     }
 
     if (bindings.length === 0) {
@@ -3707,6 +4148,9 @@ fn glsl_mod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
 fn glsl_mod_vec2(x: vec2<f32>, y: f32) -> vec2<f32> { return x - y * floor(x / y); }
 fn glsl_mod_vec3(x: vec3<f32>, y: f32) -> vec3<f32> { return x - y * floor(x / y); }
 fn glsl_mod_vec4(x: vec4<f32>, y: f32) -> vec4<f32> { return x - y * floor(x / y); }
+fn glsl_mod_vec2_vec2(x: vec2<f32>, y: vec2<f32>) -> vec2<f32> { return x - y * floor(x / y); }
+fn glsl_mod_vec3_vec3(x: vec3<f32>, y: vec3<f32>) -> vec3<f32> { return x - y * floor(x / y); }
+fn glsl_mod_vec4_vec4(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> { return x - y * floor(x / y); }
 
 fn lessThan_vec2(a: vec2<f32>, b: vec2<f32>) -> vec2<bool> { return vec2<bool>(a.x < b.x, a.y < b.y); }
 fn lessThan_vec3(a: vec3<f32>, b: vec3<f32>) -> vec3<bool> { return vec3<bool>(a.x < b.x, a.y < b.y, a.z < b.z); }

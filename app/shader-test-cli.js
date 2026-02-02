@@ -46,7 +46,7 @@ function logResult(result) {
   log(`${result.shaderName} (${result.category}) - ${result.duration.toFixed(0)}ms`, color);
 
   if (result.error) {
-    log(`  Error: ${result.error.split('\n')[0]}`, 'red');
+    log(`  Error: ${result.error.split('\n')[0]} (Line: ${result.errorLine ?? 'unknown'}, Column: ${result.errorColumn ?? 'unknown'})`, 'red');
   }
 }
 
