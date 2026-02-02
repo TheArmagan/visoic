@@ -31,6 +31,17 @@ contextBridge.exposeInMainWorld('VISOICNative', {
     readShaderById: (id: string): Promise<{ fragment: string; vertex: string | null } | null> =>
       ipcRenderer.invoke('isf:readShaderById', id),
   },
+  // Graph File System API
+  graph: {
+    showSaveDialog: (): Promise<string | null> =>
+      ipcRenderer.invoke('graph:showSaveDialog'),
+    showOpenDialog: (): Promise<string | null> =>
+      ipcRenderer.invoke('graph:showOpenDialog'),
+    saveToFile: (filePath: string, content: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('graph:saveToFile', filePath, content),
+    loadFromFile: (filePath: string): Promise<{ success: boolean; content?: string; error?: string }> =>
+      ipcRenderer.invoke('graph:loadFromFile', filePath),
+  },
   // Shader Test Suite API
   shaderTest: {
     // Send test progress to main process (for CLI clients)

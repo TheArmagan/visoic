@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -148,6 +148,58 @@ function createWindow() {
       return JSON.parse(data);
     } catch (error) {
       return null;
+    }
+  });
+
+  // ==========================================
+  // Graph File System API
+  // ==========================================
+
+  // Show save dialog and return selected path
+  ipcMain.handle('graph:showSaveDialog', async () => {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Graph',
+      defaultPath: `visoic-graph-${Date.now()}.json`,
+      filters: [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ]
+    });
+    return result.canceled ? null : result.filePath;
+  });
+
+  // Show open dialog and return selected path
+  ipcMain.handle('graph:showOpenDialog', async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Open Graph',
+      filters: [
+        { name: 'JSON Files', extensions: ['json'] },
+        { name: 'All Files', extensions: ['*'] }
+      ],
+      properties: ['openFile']
+    });
+    return result.canceled ? null : result.filePaths[0];
+  });
+
+  // Save graph to a specific file path
+  ipcMain.handle('graph:saveToFile', async (_event, filePath: string, content: string) => {
+    try {
+      await fs.writeFile(filePath, content, 'utf-8');
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to save graph:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Load graph from a specific file path
+  ipcMain.handle('graph:loadFromFile', async (_event, filePath: string) => {
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      return { success: true, content };
+    } catch (error) {
+      console.error('Failed to load graph:', error);
+      return { success: false, error: String(error) };
     }
   });
 

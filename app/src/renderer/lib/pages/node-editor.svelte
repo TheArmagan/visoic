@@ -26,6 +26,10 @@
     type VisoicNode,
     type VisoicEdge,
     isConnectionValid as checkConnectionValid,
+    getLayoutedElements,
+    layoutPresets,
+    type LayoutDirection,
+    DATA_TYPE_INFO,
   } from "$lib/api/nodes";
   import {
     useNodeOperations,
@@ -33,20 +37,33 @@
     useGraphSerialization,
   } from "$lib/api/nodes/hooks.svelte";
   import { Button } from "$lib/components/ui/button";
-  import * as ContextMenu from "$lib/components/ui/context-menu";
 
-  // State - use any to bypass strict SvelteFlow type checking
+  // State - use $state.raw as recommended by SvelteFlow for performance
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let nodes = $state<any[]>([]);
+  let nodes = $state.raw<any[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let edges = $state<any[]>([]);
+  let edges = $state.raw<any[]>([]);
+
+  // Helper function to apply edge styles based on data type
+  function applyEdgeStyles(edgeList: VisoicEdge[]) {
+    return edgeList.map((edge) => {
+      const dataType = edge.data?.dataType || "any";
+      const typeInfo = DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+      const edgeColor = typeInfo?.color || "#888";
+      return {
+        ...edge,
+        type: "smoothstep",
+        style: `stroke: ${edgeColor}; stroke-width: 2;`,
+      };
+    });
+  }
 
   // Initialize nodes/edges with type sync
   {
     const initialNodes = nodeGraph.getNodes();
     syncNodeTypesWithRegistry(initialNodes.map((n) => n.type));
     nodes = initialNodes;
-    edges = nodeGraph.getEdges();
+    edges = applyEdgeStyles(nodeGraph.getEdges());
   }
 
   // Runtime state
@@ -73,6 +90,14 @@
   // Context menu state
   let contextMenuNode = $state<string | null>(null);
   let contextMenuPosition = $state({ x: 0, y: 0 });
+
+  // Layout menu state
+  let showLayoutMenu = $state(false);
+
+  // Auto-save state
+  let autoSaveEnabled = $state(false);
+  let autoSaveInterval: ReturnType<typeof setInterval> | null = null;
+  const AUTO_SAVE_INTERVAL_MS = 60000; // 1 minute
 
   // SvelteFlow instance (will be set by FlowHelper)
   let svelteFlowInstance: ReturnType<typeof useSvelteFlow> | null = null;
@@ -137,8 +162,35 @@
     if (graphSyncTimer) {
       clearTimeout(graphSyncTimer);
     }
+    if (autoSaveInterval) {
+      clearInterval(autoSaveInterval);
+    }
     // Don't stop runtime on destroy - keep it running
   });
+
+  // Toggle auto-save
+  function toggleAutoSave() {
+    autoSaveEnabled = !autoSaveEnabled;
+
+    if (autoSaveEnabled) {
+      // Start auto-save interval
+      autoSaveInterval = setInterval(() => {
+        // Only auto-save if there's a saved file path (user has saved at least once)
+        if (serialization.currentFilePath) {
+          serialization.exportToFile();
+          console.log("[AutoSave] Saved at", new Date().toLocaleTimeString());
+        }
+      }, AUTO_SAVE_INTERVAL_MS);
+      console.log("[AutoSave] Enabled - saving every minute");
+    } else {
+      // Stop auto-save interval
+      if (autoSaveInterval) {
+        clearInterval(autoSaveInterval);
+        autoSaveInterval = null;
+      }
+      console.log("[AutoSave] Disabled");
+    }
+  }
 
   // Debounced graph sync function
   function syncNodesFromGraph(forceFullSync = false) {
@@ -193,7 +245,7 @@
     // Only update if there are actual changes
     nodes = newNodes;
 
-    // Preserve edge selection state
+    // Preserve edge selection state and add colors based on data type
     const currentEdges = nodeGraph.getEdges();
     const uiEdgeMap = new Map(edges.map((e) => [e.id, e]));
 
@@ -204,7 +256,20 @@
     if (isEdgeStructuralChange || forceFullSync) {
       edges = currentEdges.map((graphEdge) => {
         const uiEdge = uiEdgeMap.get(graphEdge.id);
-        return uiEdge ? { ...graphEdge, selected: uiEdge.selected } : graphEdge;
+        const isSelected = uiEdge?.selected || false;
+        // Get color from data type
+        const dataType = graphEdge.data?.dataType || "any";
+        const typeInfo =
+          DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+        const edgeColor = typeInfo?.color || "#888";
+
+        return {
+          ...graphEdge,
+          selected: isSelected,
+          type: "smoothstep",
+          style: `stroke: ${edgeColor}; stroke-width: ${isSelected ? 3 : 2};`,
+          animated: isSelected,
+        };
       });
     }
 
@@ -545,6 +610,114 @@
     contextMenuPosition = { x: event.clientX, y: event.clientY };
   }
 
+  // Apply layout to nodes
+  function applyLayout(direction: LayoutDirection) {
+    // Use UI nodes state which has measured dimensions from SvelteFlow
+    const currentNodes = nodes;
+    const currentEdges = edges;
+
+    console.log("[Layout] Applying layout:", direction);
+    console.log("[Layout] Current nodes:", currentNodes.length);
+    console.log("[Layout] Current edges:", currentEdges.length);
+
+    if (currentNodes.length === 0) {
+      console.log("[Layout] No nodes to layout");
+      return;
+    }
+
+    // Log measured dimensions for debugging
+    for (const node of currentNodes) {
+      console.log(
+        "[Layout] Node",
+        node.id,
+        "measured:",
+        node.measured,
+        "width/height:",
+        node.width,
+        node.height,
+      );
+    }
+
+    // Get layouted elements
+    const { nodes: layoutedNodes } = getLayoutedElements(
+      currentNodes as VisoicNode[],
+      currentEdges as VisoicEdge[],
+      { direction },
+    );
+
+    console.log("[Layout] Layouted nodes:", layoutedNodes);
+
+    // Update node positions in graph AND in local state
+    for (const layoutedNode of layoutedNodes) {
+      console.log(
+        "[Layout] Updating node:",
+        layoutedNode.id,
+        layoutedNode.position,
+      );
+      nodeGraph.updateNode(layoutedNode.id, {
+        position: layoutedNode.position,
+      });
+    }
+
+    // Directly update local nodes state for immediate UI update
+    nodes = currentNodes.map((n) => {
+      const layoutedNode = layoutedNodes.find((ln) => ln.id === n.id);
+      return layoutedNode ? { ...n, position: layoutedNode.position } : n;
+    });
+
+    // Fit view after layout
+    setTimeout(() => {
+      svelteFlowInstance?.fitView({ padding: 0.2 });
+    }, 100);
+
+    showLayoutMenu = false;
+  }
+
+  // Apply layout preset
+  function applyLayoutPreset(preset: keyof typeof layoutPresets) {
+    // Use UI nodes state which has measured dimensions from SvelteFlow
+    const currentNodes = nodes;
+    const currentEdges = edges;
+
+    console.log("[Layout] Applying preset:", preset);
+
+    if (currentNodes.length === 0) {
+      console.log("[Layout] No nodes to layout");
+      return;
+    }
+
+    const options = layoutPresets[preset];
+
+    // Get layouted elements
+    const { nodes: layoutedNodes } = getLayoutedElements(
+      currentNodes as VisoicNode[],
+      currentEdges as VisoicEdge[],
+      options,
+    );
+
+    console.log("[Layout] Layouted nodes:", layoutedNodes);
+
+    // Update node positions in graph
+    for (const layoutedNode of layoutedNodes) {
+      nodeGraph.updateNode(layoutedNode.id, {
+        position: layoutedNode.position,
+      });
+    }
+
+    // Directly update local nodes state for immediate UI update
+    nodes = currentNodes.map((n) => {
+      const layoutedNode = layoutedNodes.find((ln) => ln.id === n.id);
+      return layoutedNode ? { ...n, position: layoutedNode.position } : n;
+    });
+
+    // Fit view after layout
+    setTimeout(() => {
+      svelteFlowInstance?.fitView({ padding: 0.2 });
+    }, 100);
+
+    showLayoutMenu = false;
+  }
+
   // Keyboard shortcuts
   function handleKeydown(event: KeyboardEvent) {
     // Save/Load shortcuts
@@ -616,6 +789,102 @@
     >
       📂 Load
     </Button>
+
+    <Button
+      variant="outline"
+      size="sm"
+      onclick={toggleAutoSave}
+      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700 {autoSaveEnabled
+        ? 'border-green-500 text-green-400'
+        : ''}"
+      title={autoSaveEnabled
+        ? "Auto-save enabled (every 1 min)"
+        : "Enable auto-save"}
+    >
+      {autoSaveEnabled ? "🔄 Auto" : "⏸️ Auto"}
+    </Button>
+
+    <!-- Layout Button with Dropdown -->
+    <div class="relative">
+      <Button
+        variant="outline"
+        size="sm"
+        onclick={() => (showLayoutMenu = !showLayoutMenu)}
+        class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+      >
+        📐 Layout
+      </Button>
+
+      {#if showLayoutMenu}
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="fixed inset-0 z-40"
+          onclick={() => (showLayoutMenu = false)}
+        ></div>
+        <div
+          class="absolute top-full left-0 mt-1 z-50 min-w-[180px] rounded-md border border-neutral-700 bg-neutral-900 p-1 shadow-lg"
+        >
+          <div class="px-2 py-1.5 text-xs text-neutral-500 font-semibold">
+            Direction
+          </div>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayout("TB")}
+          >
+            <span>⬇️</span>
+            <span>Top to Bottom</span>
+          </button>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayout("BT")}
+          >
+            <span>⬆️</span>
+            <span>Bottom to Top</span>
+          </button>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayout("LR")}
+          >
+            <span>➡️</span>
+            <span>Left to Right</span>
+          </button>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayout("RL")}
+          >
+            <span>⬅️</span>
+            <span>Right to Left</span>
+          </button>
+
+          <div class="h-px bg-neutral-700 my-1"></div>
+          <div class="px-2 py-1.5 text-xs text-neutral-500 font-semibold">
+            Presets
+          </div>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayoutPreset("compact")}
+          >
+            <span>📦</span>
+            <span>Compact</span>
+          </button>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayoutPreset("spread")}
+          >
+            <span>🔲</span>
+            <span>Spread Out</span>
+          </button>
+          <button
+            class="w-full flex items-center gap-2 px-2 py-1.5 text-sm text-neutral-200 rounded hover:bg-neutral-800 cursor-pointer"
+            onclick={() => applyLayoutPreset("horizontal")}
+          >
+            <span>↔️</span>
+            <span>Horizontal Flow</span>
+          </button>
+        </div>
+      {/if}
+    </div>
   </div>
 
   <!-- Stats -->
@@ -651,6 +920,38 @@
         // Trigger sync after interaction ends
         syncNodesFromGraph();
       }}
+      onedgeclick={(event) => {
+        // Toggle animation on clicked edge
+        const clickedEdgeId = event.edge.id;
+        edges = edges.map((edge) => {
+          const isClicked = edge.id === clickedEdgeId;
+          const dataType = edge.data?.dataType || "any";
+          const typeInfo =
+            DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+          const edgeColor = typeInfo?.color || "#888";
+          return {
+            ...edge,
+            selected: isClicked,
+            style: `stroke: ${edgeColor}; stroke-width: ${isClicked ? 3 : 2};`,
+            animated: isClicked,
+          };
+        });
+      }}
+      onpaneclick={() => {
+        // Deselect all edges when clicking on pane
+        edges = edges.map((edge) => {
+          const dataType = edge.data?.dataType || "any";
+          const typeInfo =
+            DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+          const edgeColor = typeInfo?.color || "#888";
+          return {
+            ...edge,
+            selected: false,
+            style: `stroke: ${edgeColor}; stroke-width: 2;`,
+            animated: false,
+          };
+        });
+      }}
       onconnectend={onConnectEnd}
       onnodecontextmenu={(event) => {
         handleNodeContextMenu(event.event, event.node.id);
@@ -664,6 +965,7 @@
       deleteKey={["Delete", "Backspace"]}
       connectionLineStyle="stroke: #888; stroke-width: 2;"
       defaultEdgeOptions={{
+        type: "smoothstep",
         style: "stroke: #888; stroke-width: 2;",
       }}
     >

@@ -324,45 +324,142 @@ export function useGraphEvaluation() {
 // Serialization Hooks
 // ============================================
 
+// Track the last saved file path for autosave
+let lastSavedFilePath: string | null = null;
+
+// Get the native API (Electron)
+function getNativeAPI() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (window as any).VISOICNative?.graph;
+}
+
 export function useGraphSerialization() {
   return {
     serialize: () => nodeGraph.serialize(),
     deserialize: (json: string) => nodeGraph.deserialize(json),
-    clear: () => nodeGraph.clear(),
+    clear: () => {
+      nodeGraph.clear();
+      // Reset last saved path when clearing
+      lastSavedFilePath = null;
+    },
 
-    exportToFile: () => {
+    // Get current file path (for UI display)
+    get currentFilePath() {
+      return lastSavedFilePath;
+    },
+
+    exportToFile: async (forceNewPath = false) => {
       const json = nodeGraph.serialize();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `visoic-graph-${Date.now()}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const nativeAPI = getNativeAPI();
+
+      // If we have native API (Electron), use it for proper file saving
+      if (nativeAPI) {
+        let filePath = lastSavedFilePath;
+
+        // If no saved path or forced new path, show save dialog
+        if (!filePath || forceNewPath) {
+          filePath = await nativeAPI.showSaveDialog();
+          if (!filePath) {
+            return; // User cancelled
+          }
+        }
+
+        // Save to the file
+        const result = await nativeAPI.saveToFile(filePath, json);
+        if (result.success) {
+          lastSavedFilePath = filePath;
+          console.log('[Graph] Saved to:', filePath);
+        } else {
+          console.error('[Graph] Failed to save:', result.error);
+          // Fallback to browser download on error
+          fallbackDownload(json);
+        }
+      } else {
+        // Fallback for browser environment
+        fallbackDownload(json);
+      }
+    },
+
+    // Save As - always shows dialog
+    exportToFileAs: async () => {
+      const json = nodeGraph.serialize();
+      const nativeAPI = getNativeAPI();
+
+      if (nativeAPI) {
+        const filePath = await nativeAPI.showSaveDialog();
+        if (!filePath) {
+          return; // User cancelled
+        }
+
+        const result = await nativeAPI.saveToFile(filePath, json);
+        if (result.success) {
+          lastSavedFilePath = filePath;
+          console.log('[Graph] Saved to:', filePath);
+        } else {
+          console.error('[Graph] Failed to save:', result.error);
+          fallbackDownload(json);
+        }
+      } else {
+        fallbackDownload(json);
+      }
     },
 
     importFromFile: async () => {
-      return new Promise<void>((resolve, reject) => {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.json';
-        input.onchange = async (e) => {
-          const file = (e.target as HTMLInputElement).files?.[0];
-          if (!file) {
-            reject(new Error('No file selected'));
-            return;
-          }
+      const nativeAPI = getNativeAPI();
 
-          try {
-            const text = await file.text();
-            nodeGraph.deserialize(text);
-            resolve();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        input.click();
-      });
+      if (nativeAPI) {
+        // Use native file dialog
+        const filePath = await nativeAPI.showOpenDialog();
+        if (!filePath) {
+          return; // User cancelled
+        }
+
+        const result = await nativeAPI.loadFromFile(filePath);
+        if (result.success && result.content) {
+          nodeGraph.deserialize(result.content);
+          lastSavedFilePath = filePath; // Remember the path for autosave
+          console.log('[Graph] Loaded from:', filePath);
+        } else {
+          console.error('[Graph] Failed to load:', result.error);
+          throw new Error(result.error || 'Failed to load file');
+        }
+      } else {
+        // Fallback for browser environment
+        return new Promise<void>((resolve, reject) => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json';
+          input.onchange = async (e) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (!file) {
+              reject(new Error('No file selected'));
+              return;
+            }
+
+            try {
+              const text = await file.text();
+              nodeGraph.deserialize(text);
+              // Can't get real path in browser, but store the name
+              lastSavedFilePath = null;
+              resolve();
+            } catch (error) {
+              reject(error);
+            }
+          };
+          input.click();
+        });
+      }
     },
   };
+}
+
+// Fallback download for browser environment
+function fallbackDownload(json: string) {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `visoic-graph-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
