@@ -956,6 +956,7 @@ export class ISFToWGSLCompiler {
 
     // Rewrite bool casts, mod calls, bitwise ops
     wgsl = this.rewriteBoolCasts(wgsl);
+    wgsl = this.fixBoolComparisons(wgsl);
     wgsl = this.rewriteModCalls(wgsl);
     wgsl = this.rewriteBitwiseOps(wgsl);
 
@@ -1046,6 +1047,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     wgsl = this.fixInvalidCharacters(wgsl);
     wgsl = this.fixUnresolvedVariables(wgsl);
     wgsl = this.fixModuleScopeReferences(wgsl);
+    wgsl = this.fixBoolComparisons(wgsl);
+    wgsl = this.fixClampScalarVectorMix(wgsl);
 
     return wgsl;
   }
@@ -1503,12 +1506,40 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // bool(x) -> (x != 0.0) or (x != 0) depending on context
     return code.replace(/\bbool\s*\(\s*([^)]+)\s*\)/g, (_, expr) => {
       const trimmed = expr.trim();
-      // If it's clearly an int, use != 0
-      if (/^[a-zA-Z_]\w*$/.test(trimmed)) {
-        return `(${trimmed} != 0.0)`;
+      if (/\btrue\b|\bfalse\b/.test(trimmed) || /==|!=|<|>|<=|>=/.test(trimmed)) {
+        return `(${trimmed})`;
       }
       return `(${trimmed} != 0.0)`;
     });
+  }
+
+  private fixBoolComparisons(code: string): string {
+    let result = code;
+    const boolVars: string[] = [];
+    const boolDeclPattern = /\b(?:var|let|const)\s+(\w+)\s*:\s*bool\b/g;
+    let match;
+    while ((match = boolDeclPattern.exec(code)) !== null) {
+      boolVars.push(match[1]);
+    }
+
+    for (const name of boolVars) {
+      const safeName = this.escapeRegex(name);
+      const notZeroParen = new RegExp(`\\(\\s*${safeName}\\s*\\)\\s*!=\\s*0\\.0`, 'g');
+      const notZeroDoubleParen = new RegExp(`\\(\\s*\\(\\s*${safeName}\\s*\\)\\s*!=\\s*0\\.0\\s*\\)`, 'g');
+      const notZeroPlain = new RegExp(`\\b${safeName}\\b\\s*!=\\s*0\\.0`, 'g');
+      result = result.replace(notZeroDoubleParen, name);
+      result = result.replace(notZeroParen, name);
+      result = result.replace(notZeroPlain, name);
+
+      const zeroParen = new RegExp(`\\(\\s*${safeName}\\s*\\)\\s*==\\s*0\\.0`, 'g');
+      const zeroDoubleParen = new RegExp(`\\(\\s*\\(\\s*${safeName}\\s*\\)\\s*==\\s*0\\.0\\s*\\)`, 'g');
+      const zeroPlain = new RegExp(`\\b${safeName}\\b\\s*==\\s*0\\.0`, 'g');
+      result = result.replace(zeroDoubleParen, `!${name}`);
+      result = result.replace(zeroParen, `!${name}`);
+      result = result.replace(zeroPlain, `!${name}`);
+    }
+
+    return result;
   }
 
   private rewriteModCalls(code: string): string {
@@ -1673,7 +1704,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
           const falseVal = result.slice(falseStart, falseEnd).trim();
 
           if (condition && trueVal && falseVal) {
-            const replacement = `select(${falseVal}, ${trueVal}, ${condition})`;
+            const boolCondition = this.ensureBooleanCondition(condition);
+            const replacement = `select(${falseVal}, ${trueVal}, ${boolCondition})`;
             result = result.slice(0, condStart) + replacement + result.slice(falseEnd);
             found = true;
             break;
@@ -1687,6 +1719,21 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return result;
   }
 
+  private ensureBooleanCondition(condition: string): string {
+    const trimmed = condition.trim();
+    if (!trimmed) return condition;
+
+    if (/(==|!=|<=|>=|<|>)/.test(trimmed)) return condition;
+    if (/(\&\&|\|\|)/.test(trimmed)) return condition;
+    if (/\btrue\b|\bfalse\b/.test(trimmed)) return condition;
+    if (/^!/.test(trimmed) || /\bbool\s*\(/.test(trimmed)) return condition;
+
+    // If it's a simple identifier or member access, assume it's already boolean
+    if (/^[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)?$/.test(trimmed)) return condition;
+
+    return `(${condition} != 0.0)`;
+  }
+
   private addBracesToIfStatements(code: string): string {
     // WGSL requires braces around if/else/for/while bodies
     // Use character-by-character parsing to handle multi-line cases properly
@@ -1696,7 +1743,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     while (i < code.length) {
       // Check for keywords
-      const keywordMatch = code.substring(i).match(/^(if|else|for|while)(?![a-zA-Z0-9_])/);
+      const keywordMatch = code.substring(i).match(/^(if|else|while)(?![a-zA-Z0-9_])/);
 
       if (!keywordMatch) {
         result += code[i];
@@ -1827,10 +1874,71 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
   private fixForLoopBraces(code: string): string {
     // for (...) statement; -> for (...) { statement; }
-    return code.replace(/\bfor\s*\(([^)]+)\)\s*([^{\n;]+;)/g, (match, header, body) => {
-      if (body.trim().startsWith('{')) return match;
-      return `for (${header}) { ${body.trim()} }`;
-    });
+    let result = '';
+    let index = 0;
+
+    while (index < code.length) {
+      const nextFor = code.indexOf('for', index);
+      if (nextFor === -1) {
+        result += code.slice(index);
+        break;
+      }
+
+      const before = code[nextFor - 1];
+      const after = code[nextFor + 3];
+      if ((before && /[a-zA-Z0-9_]/.test(before)) || (after && /[a-zA-Z0-9_]/.test(after))) {
+        result += code.slice(index, nextFor + 3);
+        index = nextFor + 3;
+        continue;
+      }
+
+      result += code.slice(index, nextFor);
+      result += 'for';
+      index = nextFor + 3;
+
+      while (index < code.length && /\s/.test(code[index])) {
+        result += code[index];
+        index++;
+      }
+
+      if (code[index] !== '(') {
+        result += code[index] || '';
+        index++;
+        continue;
+      }
+
+      const parenStart = index;
+      const parenEnd = this.findMatchingParen(code, parenStart);
+      if (parenEnd === -1) {
+        result += code.slice(index);
+        break;
+      }
+
+      result += code.slice(parenStart, parenEnd + 1);
+      index = parenEnd + 1;
+
+      while (index < code.length && /\s/.test(code[index])) {
+        result += code[index];
+        index++;
+      }
+
+      if (code[index] === '{') {
+        result += code[index];
+        index++;
+        continue;
+      }
+
+      const statement = this.extractStatement(code, index);
+      if (statement) {
+        result += '{ ' + statement.text + ' }';
+        index = statement.end;
+      } else {
+        result += code[index] || '';
+        index++;
+      }
+    }
+
+    return result;
   }
 
   private fixSwitchCaseStatements(code: string): string {
@@ -1986,70 +2094,104 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // v.xy = expr; -> v = vec4<f32>(expr, v.z, v.w);
 
     let result = code;
+    const varTypes = this.collectVarTypesFromCode(code);
+    const getVecSize = (name: string): number => {
+      const type = varTypes.get(name);
+      if (!type) return 4;
+      if (type.startsWith('vec2')) return 2;
+      if (type.startsWith('vec3')) return 3;
+      if (type.startsWith('vec4')) return 4;
+      return 4;
+    };
 
     // NOTE: We don't handle single component assignments (.x =, .y =, etc.) 
     // because we can't easily determine the vector size at this stage.
     // Those are rare in ISF shaders anyway.
 
     // .rgb = expr (for vec4)
-    result = result.replace(/(\w+)\.rgb\s*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `${v} = vec3<f32>(${expr});`;
       return `${v} = vec4<f32>((${expr}), ${v}.w);`;
     });
 
-    // .xy = expr (for vec2, vec3 or vec4) - we can't determine size, so skip for now
-    // result = result.replace(/(\w+)\.xy\s*=\s*([^;]+);/g, (_, v, expr) => {
-    //   return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, _sw.y, ${v}.z, ${v}.w); }`;
-    // });
+    // .xy = expr (vec2/vec3/vec4)
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 2) return `${v} = vec2<f32>(${expr});`;
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(_sw.x, _sw.y, ${v}.z); }`;
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, _sw.y, ${v}.z, ${v}.w); }`;
+    });
 
     // .xyz = expr (for vec4)
-    result = result.replace(/(\w+)\.xyz\s*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xyz\s*=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, _sw.y, _sw.z, ${v}.w); }`;
     });
 
     // Compound assignments: +=, -=, *=, /=
-    result = result.replace(/(\w+)\.rgb\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `${v} = vec3<f32>(${v}.rgb + (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb + (${expr}), ${v}.w);`;
     });
-    result = result.replace(/(\w+)\.rgb\s*-=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*-=?\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `${v} = vec3<f32>(${v}.rgb - (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb - (${expr}), ${v}.w);`;
     });
-    result = result.replace(/(\w+)\.rgb\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `${v} = vec3<f32>(${v}.rgb * (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb * (${expr}), ${v}.w);`;
     });
-    result = result.replace(/(\w+)\.rgb\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `${v} = vec3<f32>(${v}.rgb / (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb / (${expr}), ${v}.w);`;
     });
 
     // .xy compound assignments
-    result = result.replace(/(\w+)\.xy\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 2) return `{ let _sw = ${expr}; ${v} = vec2<f32>(${v}.x + _sw.x, ${v}.y + _sw.y); }`;
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x + _sw.x, ${v}.y + _sw.y, ${v}.z); }`;
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x + _sw.x, ${v}.y + _sw.y, ${v}.z, ${v}.w); }`;
     });
-    result = result.replace(/(\w+)\.xy\s*-=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*-=?\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 2) return `{ let _sw = ${expr}; ${v} = vec2<f32>(${v}.x - _sw.x, ${v}.y - _sw.y); }`;
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x - _sw.x, ${v}.y - _sw.y, ${v}.z); }`;
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x - _sw.x, ${v}.y - _sw.y, ${v}.z, ${v}.w); }`;
     });
-    result = result.replace(/(\w+)\.xy\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 2) return `{ let _sw = ${expr}; ${v} = vec2<f32>(${v}.x * _sw.x, ${v}.y * _sw.y); }`;
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x * _sw.x, ${v}.y * _sw.y, ${v}.z); }`;
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x * _sw.x, ${v}.y * _sw.y, ${v}.z, ${v}.w); }`;
     });
-    result = result.replace(/(\w+)\.xy\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 2) return `{ let _sw = ${expr}; ${v} = vec2<f32>(${v}.x / _sw.x, ${v}.y / _sw.y); }`;
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x / _sw.x, ${v}.y / _sw.y, ${v}.z); }`;
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x / _sw.x, ${v}.y / _sw.y, ${v}.z, ${v}.w); }`;
     });
 
     // .zw compound assignments
-    result = result.replace(/(\w+)\.zw\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.zw\s*\+=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z + _sw.x, ${v}.w + _sw.y); }`;
     });
-    result = result.replace(/(\w+)\.zw\s*-=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.zw\s*-=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z - _sw.x, ${v}.w - _sw.y); }`;
     });
-    result = result.replace(/(\w+)\.zw\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.zw\s*\*=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z * _sw.x, ${v}.w * _sw.y); }`;
     });
-    result = result.replace(/(\w+)\.zw\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.zw\s*\/=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z / _sw.x, ${v}.w / _sw.y); }`;
     });
 
     // .zw = expr (for vec4)
-    result = result.replace(/(\w+)\.zw\s*=\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.zw\s*=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, _sw.x, _sw.y); }`;
     });
 
@@ -2091,75 +2233,264 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private fixClampCalls(code: string): string {
-    let result = code;
-    // Pattern 1: Unwrap simple vec constructors: clamp(x, vec2(0.0), vec2(1.0)) -> clamp(x, 0.0, 1.0)
-    result = result.replace(/\bclamp\s*\(\s*([^,]+),\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*\)/g,
-      'clamp($1, $2, $3)');
+    return this.rewriteVectorScalarBuiltins(code, 'clamp', 3, (args, getVectorType, isScalar, promoteScalar) => {
+      const arg0Scalar = isScalar(args[0]);
+      const arg1Splat = this.unwrapSplatVector(args[1]);
+      const arg2Splat = this.unwrapSplatVector(args[2]);
 
-    // Pattern 2: Promote scalar literals when first arg is a simple vector variable or swizzle
-    // clamp(color.rgb, 0.0, 1.0) -> clamp(color.rgb, vec3(0.0), vec3(1.0))
-    result = result.replace(/\bclamp\s*\(\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*,\s*(-?[\d.]+f?)\s*,\s*(-?[\d.]+f?)\s*\)/g,
-      (match, vecArg, swizzle, min, max) => {
-        let vecType = 'vec3<f32>';
-        if (swizzle.length === 4) vecType = 'vec4<f32>';
-        else if (swizzle.length === 3) vecType = 'vec3<f32>';
-        else if (swizzle.length === 2) vecType = 'vec2<f32>';
-        return `clamp(${vecArg}, ${vecType}(${min}), ${vecType}(${max}))`;
-      });
+      if (arg0Scalar && (arg1Splat || arg2Splat)) {
+        const nextArgs = [args[0], arg1Splat ?? args[1], arg2Splat ?? args[2]];
+        return `clamp(${nextArgs.join(', ')})`;
+      }
 
-    return result;
+      const vecType = getVectorType(args[0]) || getVectorType(args[1]) || getVectorType(args[2]);
+      if (!vecType) return null;
+
+      const nextArgs = [...args];
+      for (let i = 0; i < nextArgs.length; i++) {
+        if (isScalar(nextArgs[i])) {
+          nextArgs[i] = promoteScalar(nextArgs[i], vecType);
+        }
+      }
+      return `clamp(${nextArgs.join(', ')})`;
+    });
+  }
+
+  private unwrapSplatVector(expr: string): string | null {
+    const trimmed = expr.trim();
+    const match = trimmed.match(/^vec[234]<\w+>\s*\(\s*([^,]+)\s*\)$/);
+    if (!match) return null;
+    return match[1].trim();
   }
 
   private fixSmoothstepCalls(code: string): string {
-    let result = code;
-    // Pattern 1: Unwrap simple vec constructors
-    result = result.replace(/\bsmoothstep\s*\(\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*([^)]+)\s*\)/g,
-      'smoothstep($1, $2, $3)');
+    return this.rewriteVectorScalarBuiltins(code, 'smoothstep', 3, (args, getVectorType, isScalar, promoteScalar) => {
+      const vecType = getVectorType(args[2]) || getVectorType(args[0]) || getVectorType(args[1]);
+      if (!vecType) return null;
 
-    // Pattern 2: Promote scalar literals when third arg is a simple vector variable or swizzle
-    result = result.replace(/\bsmoothstep\s*\(\s*(-?[\d.]+f?)\s*,\s*(-?[\d.]+f?)\s*,\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*\)/g,
-      (match, min, max, vecArg, swizzle) => {
-        let vecType = 'vec3<f32>';
-        if (swizzle.length === 4) vecType = 'vec4<f32>';
-        else if (swizzle.length === 3) vecType = 'vec3<f32>';
-        else if (swizzle.length === 2) vecType = 'vec2<f32>';
-        return `smoothstep(${vecType}(${min}), ${vecType}(${max}), ${vecArg})`;
-      });
-
-    return result;
+      const nextArgs = [...args];
+      for (let i = 0; i < nextArgs.length; i++) {
+        if (isScalar(nextArgs[i])) {
+          nextArgs[i] = promoteScalar(nextArgs[i], vecType);
+        }
+      }
+      return `smoothstep(${nextArgs.join(', ')})`;
+    });
   }
 
   private fixMaxMinCalls(code: string): string {
-    let result = code;
-    // Pattern 1: Unwrap simple vec constructors: max(x, vec2(0.0)) -> max(x, 0.0)
-    result = result.replace(/\b(max|min)\s*\(\s*([^,]+),\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*\)/g,
-      '$1($2, $3)');
-    // Pattern 2: Reverse - unwrap first arg
-    result = result.replace(/\b(max|min)\s*\(\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*([^)]+)\s*\)/g,
-      '$1($2, $3)');
+    const result = this.rewriteVectorScalarBuiltins(code, 'max', 2, (args, getVectorType, isScalar, promoteScalar) => {
+      const vecType = getVectorType(args[0]) || getVectorType(args[1]);
+      if (!vecType) return null;
 
-    // Pattern 3: Promote scalar literals when first arg is a vector swizzle
-    // max(color.rgb, 0.0) -> max(color.rgb, vec3(0.0))
-    result = result.replace(/\b(max|min)\s*\(\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*,\s*(-?[\d.]+f?)\s*\)/g,
-      (match, func, vecArg, swizzle, scalar) => {
-        let vecType = 'vec3<f32>';
-        if (swizzle.length === 4) vecType = 'vec4<f32>';
-        else if (swizzle.length === 3) vecType = 'vec3<f32>';
-        else if (swizzle.length === 2) vecType = 'vec2<f32>';
-        return `${func}(${vecArg}, ${vecType}(${scalar}))`;
-      });
+      const nextArgs = [...args];
+      for (let i = 0; i < nextArgs.length; i++) {
+        if (isScalar(nextArgs[i])) {
+          nextArgs[i] = promoteScalar(nextArgs[i], vecType);
+        }
+      }
+      return `max(${nextArgs.join(', ')})`;
+    });
 
-    // Pattern 4: Reverse - max(0.0, color.rgb) -> max(vec3(0.0), color.rgb)
-    result = result.replace(/\b(max|min)\s*\(\s*(-?[\d.]+f?)\s*,\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*\)/g,
-      (match, func, scalar, vecArg, swizzle) => {
-        let vecType = 'vec3<f32>';
-        if (swizzle.length === 4) vecType = 'vec4<f32>';
-        else if (swizzle.length === 3) vecType = 'vec3<f32>';
-        else if (swizzle.length === 2) vecType = 'vec2<f32>';
-        return `${func}(${vecType}(${scalar}), ${vecArg})`;
-      });
+    return this.rewriteVectorScalarBuiltins(result, 'min', 2, (args, getVectorType, isScalar, promoteScalar) => {
+      const vecType = getVectorType(args[0]) || getVectorType(args[1]);
+      if (!vecType) return null;
 
+      const nextArgs = [...args];
+      for (let i = 0; i < nextArgs.length; i++) {
+        if (isScalar(nextArgs[i])) {
+          nextArgs[i] = promoteScalar(nextArgs[i], vecType);
+        }
+      }
+      return `min(${nextArgs.join(', ')})`;
+    });
+  }
+
+  private rewriteVectorScalarBuiltins(
+    code: string,
+    funcName: 'clamp' | 'smoothstep' | 'max' | 'min',
+    argCount: number,
+    rewriter: (
+      args: string[],
+      getVectorType: (expr: string) => string | null,
+      isScalar: (expr: string) => boolean,
+      promoteScalar: (expr: string, vecType: string) => string
+    ) => string | null
+  ): string {
+    const regex = new RegExp(`\\b${funcName}\\s*\\(`, 'g');
+    let result = '';
+    let lastIndex = 0;
+    let match;
+
+    const varTypes = this.collectVarTypesFromCode(code);
+
+    const getVectorType = (expr: string): string | null => this.getExpressionVectorType(expr, varTypes);
+    const isScalar = (expr: string): boolean => this.isScalarExpression(expr, getVectorType);
+    const promoteScalar = (expr: string, vecType: string): string => `${vecType}(${expr})`;
+
+    while ((match = regex.exec(code)) !== null) {
+      const start = match.index;
+      if (start < lastIndex) continue;
+
+      const parenStart = start + match[0].length - 1;
+      const parenEnd = this.findMatchingParen(code, parenStart);
+      if (parenEnd === -1) {
+        result += code.slice(lastIndex, start + match[0].length);
+        lastIndex = start + match[0].length;
+        continue;
+      }
+
+      const argsStr = code.slice(parenStart + 1, parenEnd);
+      const args = this.splitArgs(argsStr);
+      if (args.length === argCount) {
+        const replacement = rewriter(args, getVectorType, isScalar, promoteScalar);
+        if (replacement) {
+          result += code.slice(lastIndex, start);
+          result += replacement;
+          lastIndex = parenEnd + 1;
+          continue;
+        }
+      }
+
+      result += code.slice(lastIndex, parenEnd + 1);
+      lastIndex = parenEnd + 1;
+    }
+
+    result += code.slice(lastIndex);
     return result;
+  }
+
+  private isScalarExpression(expr: string, getVectorType: (expr: string) => string | null): boolean {
+    const trimmed = expr.trim();
+    if (!trimmed) return false;
+    if (getVectorType(trimmed)) return false;
+    if (this.isLikelyScalar(trimmed)) return true;
+    if (/\.(x|y|z|w|r|g|b|a)\b/.test(trimmed)) return true;
+    return false;
+  }
+
+  private fixClampScalarVectorMix(code: string): string {
+    const varTypes = this.collectVarTypesFromCode(code);
+    const getVectorType = (expr: string): string | null => this.getExpressionVectorType(expr, varTypes);
+    const isScalar = (expr: string): boolean => this.isScalarExpression(expr, getVectorType);
+
+    let quickResult = code;
+    const vecDeclPatterns: Array<{ regex: RegExp; vecType: 'vec2<f32>' | 'vec3<f32>' | 'vec4<f32>' }> = [
+      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec2<\w+>/g, vecType: 'vec2<f32>' },
+      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec3<\w+>/g, vecType: 'vec3<f32>' },
+      { regex: /\b(?:var|let|const)\s+(\w+)\s*:\s*vec4<\w+>/g, vecType: 'vec4<f32>' },
+    ];
+
+    for (const { regex: declRegex, vecType } of vecDeclPatterns) {
+      let declMatch;
+      while ((declMatch = declRegex.exec(code)) !== null) {
+        const name = declMatch[1];
+        const namePattern = this.escapeRegex(name);
+        const clampVec = new RegExp(`\\bclamp\\s*\\(\\s*${namePattern}\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*\\)`, 'g');
+        quickResult = quickResult.replace(clampVec, (_match, minVal, maxVal) => {
+          return `clamp(${name}, ${vecType}(${minVal}), ${vecType}(${maxVal}))`;
+        });
+      }
+    }
+    for (const [name, type] of varTypes.entries()) {
+      if (!type.startsWith('vec')) continue;
+      const vecType = type;
+      const namePattern = this.escapeRegex(name);
+      const simpleClamp = new RegExp(`\\bclamp\\s*\\(\\s*${namePattern}\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*\\)`, 'g');
+      quickResult = quickResult.replace(simpleClamp, (_match, minVal, maxVal) => {
+        return `clamp(${name}, ${vecType}(${minVal}), ${vecType}(${maxVal}))`;
+      });
+    }
+
+    const regex = /\bclamp\s*\(/g;
+    let result = '';
+    let lastIndex = 0;
+    let match;
+
+    while ((match = regex.exec(quickResult)) !== null) {
+      const start = match.index;
+      if (start < lastIndex) continue;
+
+      const parenStart = start + match[0].length - 1;
+      const parenEnd = this.findMatchingParen(quickResult, parenStart);
+      if (parenEnd === -1) {
+        result += quickResult.slice(lastIndex, start + match[0].length);
+        lastIndex = start + match[0].length;
+        continue;
+      }
+
+      const argsStr = quickResult.slice(parenStart + 1, parenEnd);
+      const args = this.splitArgs(argsStr);
+      if (args.length === 3) {
+        const arg0 = args[0].trim();
+        const vecType = getVectorType(arg0);
+        if (vecType && isScalar(args[1]) && isScalar(args[2])) {
+          const replacement = `clamp(${arg0}, ${vecType}(${args[1].trim()}), ${vecType}(${args[2].trim()}))`;
+          result += quickResult.slice(lastIndex, start);
+          result += replacement;
+          lastIndex = parenEnd + 1;
+          continue;
+        }
+      }
+
+      result += quickResult.slice(lastIndex, parenEnd + 1);
+      lastIndex = parenEnd + 1;
+    }
+
+    result += quickResult.slice(lastIndex);
+    return result;
+  }
+
+  private collectVarTypesFromCode(code: string): Map<string, string> {
+    const varTypes = new Map<string, string>(this.varTypes);
+    const declRegex = /\b(var|let|const)\s+(\w+)\s*:\s*(vec[234]<\w+>|f32|i32|u32|bool)\b/g;
+    let match;
+    while ((match = declRegex.exec(code)) !== null) {
+      varTypes.set(match[2], match[3]);
+    }
+    return varTypes;
+  }
+
+  private getExpressionVectorType(expr: string, varTypes: Map<string, string>): string | null {
+    const trimmed = expr.trim();
+    if (!trimmed) return null;
+
+    const normalized = trimmed.replace(/^[\s\(\+\-]+/, '');
+
+    // Single-component swizzles are scalar
+    if (/\.(x|y|z|w|r|g|b|a)\b/.test(trimmed)) return null;
+
+    if (normalized.startsWith('vec2<')) return 'vec2<f32>';
+    if (normalized.startsWith('vec3<')) return 'vec3<f32>';
+    if (normalized.startsWith('vec4<')) return 'vec4<f32>';
+
+    if (trimmed.includes('textureSample') || trimmed.includes('textureLoad')) return 'vec4<f32>';
+    if (trimmed.includes('input.uv') || trimmed.includes('uniforms.renderSize')) return 'vec2<f32>';
+    if (trimmed.includes('uniforms.date')) return 'vec4<f32>';
+
+    const uniformMatch = trimmed.match(/^uniforms\.(\w+)/);
+    if (uniformMatch) {
+      const uniformName = uniformMatch[1];
+      const uniformField = this.uniformFields.find((f) => f.name === uniformName);
+      if (uniformField?.wgslType?.startsWith('vec')) {
+        return uniformField.wgslType;
+      }
+    }
+
+    const swizzleMatch = trimmed.match(/\.([xyzwrgba]{2,4})\b/);
+    if (swizzleMatch) {
+      const swizzle = swizzleMatch[1];
+      if (swizzle.length === 2) return 'vec2<f32>';
+      if (swizzle.length === 3) return 'vec3<f32>';
+      if (swizzle.length === 4) return 'vec4<f32>';
+    }
+
+    if (/^[a-zA-Z_]\w*$/.test(trimmed)) {
+      const known = varTypes.get(trimmed);
+      if (known && known.startsWith('vec')) return known;
+    }
+
+    return this.inferVectorType(trimmed);
   }
 
   private fixVectorScalarBuiltinCalls(code: string, funcName: string, argCount: number): string {
@@ -2909,7 +3240,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let result = code;
 
     // Image rect variables (e.g., _inputImage_imgRect)
-    result = result.replace(/\b(\w+)_imgRect\b/g, (match, texName) => {
+    result = result.replace(/\b_?(\w+)_imgRect\b/g, (match, texName) => {
       // Check if this texture exists
       if (this.textureNames.has(texName)) {
         return `vec4<f32>(0.0, 0.0, 1.0, 1.0)`; // default rect
