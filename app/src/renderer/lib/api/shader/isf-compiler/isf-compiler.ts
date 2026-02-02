@@ -202,7 +202,6 @@ export class ISFToWGSLCompiler {
   private functionMacros: MacroDef[] = [];
   private renamedUniforms: Map<string, string> = new Map();
   private varTypes: Map<string, string> = new Map();
-  private preservedComments: string[] = [];
   private varsToInitInMain: Array<{ name: string; value: string }> = [];
   private mutableParams: Map<string, MutableParam> = new Map();
 
@@ -261,7 +260,6 @@ export class ISFToWGSLCompiler {
     this.functionMacros = [];
     this.renamedUniforms = new Map();
     this.varTypes = new Map();
-    this.preservedComments = [];
     this.varsToInitInMain = [];
     this.mutableParams = new Map();
   }
@@ -736,17 +734,9 @@ export class ISFToWGSLCompiler {
   private convertGLSLtoWGSL(glsl: string): string {
     let wgsl = glsl;
 
-    // Preserve comments by replacing them with placeholders
-    wgsl = wgsl.replace(/\/\/[^\n]*/g, (match) => {
-      const idx = this.preservedComments.length;
-      this.preservedComments.push(match);
-      return `__COMMENT_${idx}__`;
-    });
-    wgsl = wgsl.replace(/\/\*[\s\S]*?\*\//g, (match) => {
-      const idx = this.preservedComments.length;
-      this.preservedComments.push(match);
-      return `__COMMENT_${idx}__`;
-    });
+    // Remove all comments
+    wgsl = wgsl.replace(/\/\/[^\n]*/g, '');
+    wgsl = wgsl.replace(/\/\*[\s\S]*?\*\//g, '');
 
     // Remove common ISF/Shadertoy alias variable declarations
     wgsl = wgsl.replace(/^\s*vec3\s+iResolution\s*=\s*[^;]+;\s*$/gm, '// (removed iResolution alias)');
@@ -796,8 +786,13 @@ export class ISFToWGSLCompiler {
           'mat2': 'mat2x2<f32>', 'mat3': 'mat3x3<f32>', 'mat4': 'mat4x4<f32>',
           'float': 'f32', 'int': 'i32', 'bool': 'bool'
         };
+        // Store variable type for later reference
+        this.varTypes.set(name, typeMap[type] || type);
         return `const ${name}: ${typeMap[type] || type} =`;
       });
+
+    // Fix common loop counter declarations to use let instead of const
+    wgsl = wgsl.replace(/\bfor\s*\(\s*const\s+(i32|f32|u32)\s+(\w+)\s*=/g, 'for (var $2: $1 =');
 
     // Preprocess comma-separated declarations
     wgsl = this.preprocessGLSLCommaDeclarations(wgsl);
@@ -1008,8 +1003,14 @@ export class ISFToWGSLCompiler {
     // Fix float indices in array/vector access
     wgsl = this.fixFloatIndices(wgsl);
 
+    // Fix GLSL comparison functions (lessThan, greaterThan, etc.)
+    wgsl = this.fixGLSLComparisonFunctions(wgsl);
+
     // Disambiguate function overloads (WGSL doesn't support overloading)
     wgsl = this.disambiguateFunctionOverloads(wgsl);
+
+    // Fix double underscore identifiers (WGSL reserved)
+    wgsl = this.fixDoubleUnderscoreIdentifiers(wgsl);
 
     // Rename reserved keywords
     wgsl = this.renameReservedKeywords(wgsl);
@@ -1041,10 +1042,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // Ensure fs_main returns at the end
     wgsl = this.ensureFsMainReturn(wgsl);
 
-    // Restore comments
-    for (let i = 0; i < this.preservedComments.length; i++) {
-      wgsl = wgsl.replace(`__COMMENT_${i}__`, this.preservedComments[i]);
-    }
+    // Final cleanup passes
+    wgsl = this.fixInvalidCharacters(wgsl);
+    wgsl = this.fixUnresolvedVariables(wgsl);
+    wgsl = this.fixModuleScopeReferences(wgsl);
 
     return wgsl;
   }
@@ -1687,69 +1688,141 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private addBracesToIfStatements(code: string): string {
-    // WGSL requires braces around if/else bodies
-    let result = code;
+    // WGSL requires braces around if/else/for/while bodies
+    // Use character-by-character parsing to handle multi-line cases properly
 
-    // Process line by line to handle if statements without braces
-    const lines = result.split('\n');
-    const processedLines: string[] = [];
+    let result = '';
+    let i = 0;
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
+    while (i < code.length) {
+      // Check for keywords
+      const keywordMatch = code.substring(i).match(/^(if|else|for|while)(?![a-zA-Z0-9_])/);
 
-      // Check for if/else if without braces on the NEXT line
-      const ifMatch = trimmed.match(/^(if\s*\([^)]*(?:\([^)]*\)[^)]*)*\))\s*$/);
-      const elseIfMatch = trimmed.match(/^(else\s+if\s*\([^)]*(?:\([^)]*\)[^)]*)*\))\s*$/);
-      const elseMatch = trimmed.match(/^(else)\s*$/);
-
-      if (ifMatch || elseIfMatch || elseMatch) {
-        // Look at next non-empty line
-        let nextIdx = i + 1;
-        while (nextIdx < lines.length && lines[nextIdx].trim() === '') {
-          nextIdx++;
-        }
-
-        if (nextIdx < lines.length) {
-          const nextLine = lines[nextIdx].trim();
-          // If next line doesn't start with {, we need to add braces
-          if (!nextLine.startsWith('{') && !nextLine.startsWith('if') && nextLine.length > 0) {
-            processedLines.push(line + ' {');
-            // Add the statement
-            processedLines.push(lines[nextIdx]);
-            // Add closing brace with same indentation as if
-            const indent = line.match(/^(\s*)/)?.[1] || '';
-            processedLines.push(indent + '}');
-            // Skip the processed line
-            i = nextIdx;
-            continue;
-          }
-        }
-      }
-
-      // Also handle single-line if without braces
-      // if (cond) statement;
-      const singleLineIf = line.match(/^(\s*)(if\s*\([^)]*(?:\([^)]*\)[^)]*)*\))\s+([^{\s][^;]*;)\s*$/);
-      if (singleLineIf) {
-        const [, indent, ifPart, body] = singleLineIf;
-        processedLines.push(`${indent}${ifPart} { ${body.trim()} }`);
+      if (!keywordMatch) {
+        result += code[i];
+        i++;
         continue;
       }
 
-      // Handle else statement; on single line
-      const singleLineElse = line.match(/^(\s*)(else)\s+([^{if\s][^;]*;)\s*$/);
-      if (singleLineElse) {
-        const [, indent, elsePart, body] = singleLineElse;
-        if (!body.trim().startsWith('if')) {
-          processedLines.push(`${indent}${elsePart} { ${body.trim()} }`);
-          continue;
-        }
+      const keyword = keywordMatch[1];
+      result += keyword;
+      i += keyword.length;
+
+      // Skip whitespace
+      while (i < code.length && /\s/.test(code[i])) {
+        result += code[i];
+        i++;
       }
 
-      processedLines.push(line);
+      // For 'else', check if followed by 'if'
+      if (keyword === 'else') {
+        if (code.substring(i).match(/^if(?![a-zA-Z0-9_])/)) {
+          continue; // Let the 'if' handler take care of it
+        }
+
+        // Check if already has brace
+        if (code[i] === '{') {
+          result += code[i];
+          i++;
+          continue;
+        }
+
+        // Find the statement and wrap it
+        const statement = this.extractStatement(code, i);
+        if (statement) {
+          result += '{ ' + statement.text + ' }';
+          i = statement.end;
+        }
+        continue;
+      }
+
+      // For if/for/while, skip condition in parentheses
+      if (code[i] !== '(') {
+        result += code[i];
+        i++;
+        continue;
+      }
+
+      result += '(';
+      i++;
+
+      let parenDepth = 1;
+      while (i < code.length && parenDepth > 0) {
+        if (code[i] === '(') parenDepth++;
+        else if (code[i] === ')') parenDepth--;
+        result += code[i];
+        i++;
+      }
+
+      // Skip whitespace after condition
+      while (i < code.length && /\s/.test(code[i])) {
+        result += code[i];
+        i++;
+      }
+
+      // Check if already has brace
+      if (code[i] === '{') {
+        result += code[i];
+        i++;
+        continue;
+      }
+
+      // Find the statement and wrap it
+      const statement = this.extractStatement(code, i);
+      if (statement) {
+        result += '{ ' + statement.text + ' }';
+        i = statement.end;
+      }
     }
 
-    return processedLines.join('\n');
+    return result;
+  }
+
+  private extractStatement(code: string, start: number): { text: string; end: number } | null {
+    let i = start;
+    let text = '';
+    let braceDepth = 0;
+    let parenDepth = 0;
+
+    while (i < code.length) {
+      const char = code[i];
+
+      if (char === '(') {
+        parenDepth++;
+        text += char;
+        i++;
+      } else if (char === ')') {
+        parenDepth--;
+        text += char;
+        i++;
+      } else if (char === '{') {
+        if (braceDepth === 0 && parenDepth === 0) {
+          // Encountered a brace at statement level - stop here
+          break;
+        }
+        braceDepth++;
+        text += char;
+        i++;
+      } else if (char === '}') {
+        if (braceDepth === 0) {
+          // End of containing block
+          break;
+        }
+        braceDepth--;
+        text += char;
+        i++;
+      } else if (char === ';' && braceDepth === 0 && parenDepth === 0) {
+        // End of statement
+        text += char;
+        i++;
+        break;
+      } else {
+        text += char;
+        i++;
+      }
+    }
+
+    return text.trim().length > 0 ? { text: text.trim(), end: i } : null;
   }
 
   private fixForLoopBraces(code: string): string {
@@ -1914,28 +1987,80 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     let result = code;
 
+    // NOTE: We don't handle single component assignments (.x =, .y =, etc.) 
+    // because we can't easily determine the vector size at this stage.
+    // Those are rare in ISF shaders anyway.
+
     // .rgb = expr (for vec4)
     result = result.replace(/(\w+)\.rgb\s*=\s*([^;]+);/g, (_, v, expr) => {
       return `${v} = vec4<f32>((${expr}), ${v}.w);`;
     });
 
-    // .xy = expr (for vec3 or vec4)
-    result = result.replace(/(\w+)\.xy\s*=\s*([^;]+);/g, (_, v, expr) => {
-      return `{ let _sw = ${expr}; ${v} = vec3<f32>(_sw.x, _sw.y, ${v}.z); }`;
-    });
+    // .xy = expr (for vec2, vec3 or vec4) - we can't determine size, so skip for now
+    // result = result.replace(/(\w+)\.xy\s*=\s*([^;]+);/g, (_, v, expr) => {
+    //   return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, _sw.y, ${v}.z, ${v}.w); }`;
+    // });
 
     // .xyz = expr (for vec4)
     result = result.replace(/(\w+)\.xyz\s*=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, _sw.y, _sw.z, ${v}.w); }`;
     });
 
-    // += -= *= /= swizzle ops
+    // Compound assignments: +=, -=, *=, /=
     result = result.replace(/(\w+)\.rgb\s*\+=\s*([^;]+);/g, (_, v, expr) => {
       return `${v} = vec4<f32>(${v}.rgb + (${expr}), ${v}.w);`;
+    });
+    result = result.replace(/(\w+)\.rgb\s*-=\s*([^;]+);/g, (_, v, expr) => {
+      return `${v} = vec4<f32>(${v}.rgb - (${expr}), ${v}.w);`;
     });
     result = result.replace(/(\w+)\.rgb\s*\*=\s*([^;]+);/g, (_, v, expr) => {
       return `${v} = vec4<f32>(${v}.rgb * (${expr}), ${v}.w);`;
     });
+    result = result.replace(/(\w+)\.rgb\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+      return `${v} = vec4<f32>(${v}.rgb / (${expr}), ${v}.w);`;
+    });
+
+    // .xy compound assignments
+    result = result.replace(/(\w+)\.xy\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x + _sw.x, ${v}.y + _sw.y, ${v}.z, ${v}.w); }`;
+    });
+    result = result.replace(/(\w+)\.xy\s*-=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x - _sw.x, ${v}.y - _sw.y, ${v}.z, ${v}.w); }`;
+    });
+    result = result.replace(/(\w+)\.xy\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x * _sw.x, ${v}.y * _sw.y, ${v}.z, ${v}.w); }`;
+    });
+    result = result.replace(/(\w+)\.xy\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x / _sw.x, ${v}.y / _sw.y, ${v}.z, ${v}.w); }`;
+    });
+
+    // .zw compound assignments
+    result = result.replace(/(\w+)\.zw\s*\+=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z + _sw.x, ${v}.w + _sw.y); }`;
+    });
+    result = result.replace(/(\w+)\.zw\s*-=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z - _sw.x, ${v}.w - _sw.y); }`;
+    });
+    result = result.replace(/(\w+)\.zw\s*\*=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z * _sw.x, ${v}.w * _sw.y); }`;
+    });
+    result = result.replace(/(\w+)\.zw\s*\/=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, ${v}.z / _sw.x, ${v}.w / _sw.y); }`;
+    });
+
+    // .zw = expr (for vec4)
+    result = result.replace(/(\w+)\.zw\s*=\s*([^;]+);/g, (_, v, expr) => {
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, _sw.x, _sw.y); }`;
+    });
+
+    // Single component compound assignments
+    // Disabled because we can't determine vector size at this stage
+    // result = result.replace(/(\w+)\.(x|r)\s*\+=\s*([^;]+);/g, (_, v, comp, expr) => {
+    //   return `${v} = vec4<f32>(${v}.x + (${expr}), ${v}.y, ${v}.z, ${v}.w);`;
+    // });
+    // result = result.replace(/(\w+)\.(y|g)\s*\+=\s*([^;]+);/g, (_, v, comp, expr) => {
+    //   return `${v} = vec4<f32>(${v}.x, ${v}.y + (${expr}), ${v}.z, ${v}.w);`;
+    // });
 
     return result;
   }
@@ -1966,18 +2091,74 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private fixClampCalls(code: string): string {
-    // clamp(vec3, float, float) -> clamp(vec3, vec3(float), vec3(float))
-    return this.fixVectorScalarBuiltinCalls(code, 'clamp', 3);
+    let result = code;
+    // Pattern 1: Unwrap simple vec constructors: clamp(x, vec2(0.0), vec2(1.0)) -> clamp(x, 0.0, 1.0)
+    result = result.replace(/\bclamp\s*\(\s*([^,]+),\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*\)/g,
+      'clamp($1, $2, $3)');
+
+    // Pattern 2: Promote scalar literals when first arg is a simple vector variable or swizzle
+    // clamp(color.rgb, 0.0, 1.0) -> clamp(color.rgb, vec3(0.0), vec3(1.0))
+    result = result.replace(/\bclamp\s*\(\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*,\s*(-?[\d.]+f?)\s*,\s*(-?[\d.]+f?)\s*\)/g,
+      (match, vecArg, swizzle, min, max) => {
+        let vecType = 'vec3<f32>';
+        if (swizzle.length === 4) vecType = 'vec4<f32>';
+        else if (swizzle.length === 3) vecType = 'vec3<f32>';
+        else if (swizzle.length === 2) vecType = 'vec2<f32>';
+        return `clamp(${vecArg}, ${vecType}(${min}), ${vecType}(${max}))`;
+      });
+
+    return result;
   }
 
   private fixSmoothstepCalls(code: string): string {
-    // smoothstep(float, float, vec3) -> smoothstep(vec3(float), vec3(float), vec3)
-    return this.fixVectorScalarBuiltinCalls(code, 'smoothstep', 3);
+    let result = code;
+    // Pattern 1: Unwrap simple vec constructors
+    result = result.replace(/\bsmoothstep\s*\(\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*([^)]+)\s*\)/g,
+      'smoothstep($1, $2, $3)');
+
+    // Pattern 2: Promote scalar literals when third arg is a simple vector variable or swizzle
+    result = result.replace(/\bsmoothstep\s*\(\s*(-?[\d.]+f?)\s*,\s*(-?[\d.]+f?)\s*,\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*\)/g,
+      (match, min, max, vecArg, swizzle) => {
+        let vecType = 'vec3<f32>';
+        if (swizzle.length === 4) vecType = 'vec4<f32>';
+        else if (swizzle.length === 3) vecType = 'vec3<f32>';
+        else if (swizzle.length === 2) vecType = 'vec2<f32>';
+        return `smoothstep(${vecType}(${min}), ${vecType}(${max}), ${vecArg})`;
+      });
+
+    return result;
   }
 
   private fixMaxMinCalls(code: string): string {
-    let result = this.fixVectorScalarBuiltinCalls(code, 'max', 2);
-    result = this.fixVectorScalarBuiltinCalls(result, 'min', 2);
+    let result = code;
+    // Pattern 1: Unwrap simple vec constructors: max(x, vec2(0.0)) -> max(x, 0.0)
+    result = result.replace(/\b(max|min)\s*\(\s*([^,]+),\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*\)/g,
+      '$1($2, $3)');
+    // Pattern 2: Reverse - unwrap first arg
+    result = result.replace(/\b(max|min)\s*\(\s*vec[234]<f32>\s*\(\s*(-?[\d.]+f?)\s*\)\s*,\s*([^)]+)\s*\)/g,
+      '$1($2, $3)');
+
+    // Pattern 3: Promote scalar literals when first arg is a vector swizzle
+    // max(color.rgb, 0.0) -> max(color.rgb, vec3(0.0))
+    result = result.replace(/\b(max|min)\s*\(\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*,\s*(-?[\d.]+f?)\s*\)/g,
+      (match, func, vecArg, swizzle, scalar) => {
+        let vecType = 'vec3<f32>';
+        if (swizzle.length === 4) vecType = 'vec4<f32>';
+        else if (swizzle.length === 3) vecType = 'vec3<f32>';
+        else if (swizzle.length === 2) vecType = 'vec2<f32>';
+        return `${func}(${vecArg}, ${vecType}(${scalar}))`;
+      });
+
+    // Pattern 4: Reverse - max(0.0, color.rgb) -> max(vec3(0.0), color.rgb)
+    result = result.replace(/\b(max|min)\s*\(\s*(-?[\d.]+f?)\s*,\s*([a-zA-Z_]\w*\.(xyz|rgb|xyzw|rgba|xy|rg))\s*\)/g,
+      (match, func, scalar, vecArg, swizzle) => {
+        let vecType = 'vec3<f32>';
+        if (swizzle.length === 4) vecType = 'vec4<f32>';
+        else if (swizzle.length === 3) vecType = 'vec3<f32>';
+        else if (swizzle.length === 2) vecType = 'vec2<f32>';
+        return `${func}(${vecType}(${scalar}), ${vecArg})`;
+      });
+
     return result;
   }
 
@@ -2016,13 +2197,46 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       const args = this.splitArgs(argsStr);
 
       if (args.length === argCount) {
-        // Detect if we have mixed vector/scalar types
+        // PRIORITY 1: Unwrap simple vector constructors with single scalar
+        // Example: vec2<f32>(0.0) -> 0.0
+        // This fixes cases where literals were mistakenly wrapped
+        const unwrappedArgs: string[] = [];
+        let anyUnwrapped = false;
+
+        for (let argIdx = 0; argIdx < args.length; argIdx++) {
+          const arg = args[argIdx].trim();
+          // Match: vec2<f32>(SCALAR) where SCALAR is a simple number or variable
+          const simpleVecMatch = arg.match(/^vec[234]<f32>\s*\(\s*([^,()]+)\s*\)$/);
+          if (simpleVecMatch) {
+            unwrappedArgs.push(simpleVecMatch[1]);
+            anyUnwrapped = true;
+          } else {
+            unwrappedArgs.push(arg);
+          }
+        }
+
+        if (anyUnwrapped) {
+          // Check if unwrapping makes sense: if all args are now scalars, it's ok
+          // If some are vectors and some scalars, we may need to re-wrap or it's correct as-is
+          const allScalar = unwrappedArgs.every(a => this.isLikelyScalar(a));
+          const anyVector = unwrappedArgs.some(a => this.isLikelyVector(a));
+
+          if (allScalar || !anyVector) {
+            // All scalars - this is what we want
+            result += code.slice(lastIndex, start);
+            result += `${funcName}(${unwrappedArgs.join(', ')})`;
+            lastIndex = parenEnd + 1;
+            continue;
+          }
+        }
+
+        // PRIORITY 2: Detect if we have mixed vector/scalar types
         // For clamp/smoothstep/min/max, check the FIRST argument to determine vector vs scalar
         let vectorArg: string | null = null;
         let vecType: string | null = null;
 
         // Check ONLY the first argument to determine if this is a vector or scalar operation
-        const firstArg = args[0].trim();
+        const firstArg = unwrappedArgs[0].trim();
 
         // Check direct vector constructor
         if (firstArg.match(/vec[234]<f32>\s*\(/)) {
@@ -2073,12 +2287,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         if (vectorArg && vecType) {
-          const scalarArgs = args.filter(a => this.isLikelyScalar(a));
+          const scalarArgs = unwrappedArgs.filter((a, idx) => idx > 0 && this.isLikelyScalar(a));
 
           if (scalarArgs.length > 0) {
-            // Promote scalar args to vectors
-            const promotedArgs = args.map(a => {
-              if (this.isLikelyScalar(a)) {
+            // Promote scalar args (args 2+) to vectors to match arg 1
+            const promotedArgs = unwrappedArgs.map((a, idx) => {
+              if (idx > 0 && this.isLikelyScalar(a)) {
                 return `${vecType}(${a})`;
               }
               return a;
@@ -2090,6 +2304,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             continue;
           }
         }
+
+        // If we got here, all arguments are either all scalars or all vectors
+        // Don't modify the call
       }
 
       result += code.slice(lastIndex, parenEnd + 1);
@@ -2104,11 +2321,72 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     return /vec[234]|\.xyz|\.xy|\.rgb|\.rg/.test(expr);
   }
 
+  private fixGLSLComparisonFunctions(code: string): string {
+    // GLSL has comparison functions that return booleans: lessThan, greaterThan, etc.
+    // WGSL uses operators instead
+    let result = code;
+
+    // lessThan(a, b) -> (a < b)
+    result = result.replace(/\blessThan\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 < $2)');
+
+    // greaterThan(a, b) -> (a > b)
+    result = result.replace(/\bgreaterThan\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 > $2)');
+
+    // lessThanEqual(a, b) -> (a <= b)
+    result = result.replace(/\blessThanEqual\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 <= $2)');
+
+    // greaterThanEqual(a, b) -> (a >= b)
+    result = result.replace(/\bgreaterThanEqual\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 >= $2)');
+
+    // equal(a, b) -> (a == b)
+    result = result.replace(/\bequal\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 == $2)');
+
+    // notEqual(a, b) -> (a != b)
+    result = result.replace(/\bnotEqual\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/g, '($1 != $2)');
+
+    return result;
+  }
+
+  private fixDoubleUnderscoreIdentifiers(code: string): string {
+    // WGSL forbids identifiers starting with two or more underscores
+    // Find and rename them to single underscore
+    let result = code;
+
+    // Match variable declarations: var __name -> var _name
+    result = result.replace(/\b(var|let|const)\s+__+(\w+)/g, '$1 _$2');
+
+    // Match function parameters: __name: type -> _name: type
+    result = result.replace(/\b__+(\w+)\s*:/g, '_$1:');
+
+    // Match function declarations: fn __name -> fn _name
+    result = result.replace(/\bfn\s+__+(\w+)/g, 'fn _$1');
+
+    // Match all other usages: __name -> _name (but avoid triple underscores)
+    result = result.replace(/\b__+(\w+)/g, '_$1');
+
+    return result;
+  }
+
   private isLikelyScalar(expr: string): boolean {
-    // Simple heuristic: is it a number, or a simple identifier without swizzle?
+    // Simple heuristic: is it a number, or a simple identifier without swizzle, or a function call?
     const trimmed = expr.trim();
+
+    // Numeric literal
     if (/^-?\d+\.?\d*$/.test(trimmed)) return true;
+
+    // Simple identifier (variable name)
     if (/^[a-zA-Z_]\w*$/.test(trimmed) && !this.isLikelyVector(trimmed)) return true;
+
+    // Function call that doesn't have vec in it (likely returns scalar)
+    // e.g., rand(...), sin(...), cos(...), etc.
+    if (/^\w+\([^)]*\)$/.test(trimmed) && !trimmed.includes('vec')) {
+      // Additional check: if it's a known vector-returning function, it's not scalar
+      if (trimmed.match(/^(texture|textureSample|textureSampleLevel)/)) {
+        return false; // These return vec4
+      }
+      return true;
+    }
+
     return false;
   }
 
@@ -2340,9 +2618,19 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
       // Fix module-scope var declarations
       if (!inFunction && braceDepth === 0) {
-        const varMatch = line.match(/^(\s*)var\s+(\w+)\s*:\s*(.+?)\s*(?:=|;)/);
+        const varMatch = line.match(/^(\s*)var\s+(\w+)\s*:\s*(.+?)\s*(=\s*(.+?))?\s*;/);
         if (varMatch && !line.includes('<private>') && !line.includes('<uniform>') && !line.includes('<storage>')) {
-          const [, indent, name, type] = varMatch;
+          const [, indent, name, type, initPart, initValue] = varMatch;
+
+          // If initialized with uniforms, defer initialization to main
+          if (initPart && initValue && initValue.includes('uniforms.')) {
+            // Remove initialization, add to varsToInitInMain
+            const newLine = `${indent}var<private> ${name}: ${type};`;
+            result.push(newLine);
+            this.varsToInitInMain.push({ name, value: initValue.trim() });
+            continue;
+          }
+
           const newLine = line.replace(/var\s+(\w+)\s*:/, `var<private> ${name}:`);
           result.push(newLine);
           continue;
@@ -2583,6 +2871,126 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
   private escapeRegex(str: string): string {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private fixInvalidCharacters(code: string): string {
+    // Remove or replace invalid Unicode characters that WGSL doesn't support
+    let result = code;
+
+    // Replace smart quotes with regular quotes
+    result = result.replace(/[""]/g, '"');
+    result = result.replace(/['']/g, "'");
+
+    // Replace em-dash and en-dash with regular dash
+    result = result.replace(/[—–]/g, '-');
+
+    // Replace ellipsis
+    result = result.replace(/…/g, '...');
+
+    // Remove zero-width characters
+    result = result.replace(/[\u200B-\u200D\uFEFF]/g, '');
+
+    // Replace non-ASCII characters in identifiers (use token-based approach)
+    const lines = result.split('\n');
+    const fixedLines = lines.map(line => {
+      // Check if line has non-ASCII in identifier positions
+      return line.replace(/\b(\w*[^\x00-\x7F]\w*)\b/g, (match) => {
+        // Only fix if it looks like an identifier (not in string/comment)
+        // Simple heuristic: if surrounded by code-like context
+        return match.replace(/[^\x00-\x7F]/g, '_');
+      });
+    });
+
+    return fixedLines.join('\n');
+  }
+
+  private fixUnresolvedVariables(code: string): string {
+    // Fix common patterns of unresolved variables from ISF
+    let result = code;
+
+    // Image rect variables (e.g., _inputImage_imgRect)
+    result = result.replace(/\b(\w+)_imgRect\b/g, (match, texName) => {
+      // Check if this texture exists
+      if (this.textureNames.has(texName)) {
+        return `vec4<f32>(0.0, 0.0, 1.0, 1.0)`; // default rect
+      }
+      return match;
+    });
+
+    // IMG_SIZE macros
+    result = result.replace(/\bIMG_SIZE\s*\(\s*(\w+)\s*\)/g, (match, texName) => {
+      return 'uniforms.renderSize';
+    });
+
+    // IMG_NORM_PIXEL macros
+    result = result.replace(/\bIMG_NORM_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\s*\)/g, (match, texName, coord) => {
+      return `textureSample(${texName}, ${texName}_sampler, ${coord})`;
+    });
+
+    // IMG_PIXEL macros
+    result = result.replace(/\bIMG_PIXEL\s*\(\s*(\w+)\s*,\s*([^)]+)\s*\)/g, (match, texName, coord) => {
+      return `textureSample(${texName}, ${texName}_sampler, (${coord}) / uniforms.renderSize)`;
+    });
+
+    // IMG_THIS_PIXEL macros
+    result = result.replace(/\bIMG_THIS_PIXEL\s*\(\s*(\w+)\s*\)/g, (match, texName) => {
+      return `textureSample(${texName}, ${texName}_sampler, input.uv)`;
+    });
+
+    return result;
+  }
+
+  private fixModuleScopeReferences(code: string): string {
+    // Fix 'var X cannot be referenced at module-scope' errors
+    // These occur when module-scope variables try to use other module variables
+    let result = code;
+
+    // Find all module-scope var declarations that reference other vars
+    const lines = result.split('\n');
+    const fixedLines: string[] = [];
+    let inFsMain = false;
+    let fsMainBraceIndex = -1;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
+      // Check if we're entering fs_main
+      if (line.includes('fn fs_main(')) {
+        inFsMain = true;
+        fixedLines.push(line);
+        continue;
+      }
+
+      // Track opening brace of fs_main
+      if (inFsMain && fsMainBraceIndex === -1 && line.includes('{')) {
+        fsMainBraceIndex = fixedLines.length;
+        fixedLines.push(line);
+        continue;
+      }
+
+      // Check if this is a module-scope var that references other vars
+      if (!inFsMain && line.trim().startsWith('var ') && line.includes('=')) {
+        const varMatch = line.match(/var\s+(\w+)\s*:\s*([^=]+)\s*=\s*(.+);/);
+        if (varMatch) {
+          const [, varName, varType, varInit] = varMatch;
+
+          // Check if initialization references uniforms or other module vars
+          if (varInit.includes('uniforms.') || varInit.includes('input.')) {
+            // Comment out at module scope and add to varsToInitInMain
+            fixedLines.push(`// ${line.trim()} // Moved to fs_main`);
+            this.varsToInitInMain.push({ name: varName, value: varInit.trim() });
+
+            // Also add declaration without initialization
+            fixedLines.push(`var ${varName}: ${varType.trim()};`);
+            continue;
+          }
+        }
+      }
+
+      fixedLines.push(line);
+    }
+
+    return fixedLines.join('\n');
   }
 
   // ==========================================================================
