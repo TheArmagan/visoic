@@ -1628,40 +1628,43 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
           let parenDepth = 0;
           let condStart = condEnd;
 
-          if (result[condEnd] === ')') {
-            // Condition ends with ), find matching (
-            parenDepth = 1;
-            condStart--;
-            while (condStart >= 0 && parenDepth > 0) {
-              if (result[condStart] === ')') parenDepth++;
-              if (result[condStart] === '(') parenDepth--;
-              condStart--;
-            }
-            condStart++; // Point to the opening (
-          } else {
-            // Walk backwards through the condition expression
-            // Stop at: = ( , ; or start of line
-            // But keep going through: identifiers, dots, operators (<, >, !, &, |, etc.)
-            while (condStart > 0) {
-              const char = result[condStart - 1];
-              const twoChar = result.slice(condStart - 2, condStart);
+          while (condStart > 0) {
+            const char = result[condStart - 1];
 
-              // Stop at statement/expression boundaries
-              if (char === '=' && result[condStart - 2] !== '!' && result[condStart - 2] !== '<' && result[condStart - 2] !== '>') break;
-              if (char === '(' || char === ',' || char === ';' || char === '{') break;
-              if (char === '\n') {
-                // Check if previous non-whitespace is a continuation
-                let checkPos = condStart - 2;
-                while (checkPos >= 0 && /\s/.test(result[checkPos])) checkPos--;
-                if (checkPos < 0 || result[checkPos] === ';' || result[checkPos] === '{') break;
+            if (char === ')') {
+              parenDepth++;
+            } else if (char === '(') {
+              if (parenDepth > 0) {
+                parenDepth--;
+              } else {
+                break; // Unmatched open paren -> stop
               }
-
-              condStart--;
+            } else if (char === ']' || char === '}') {
+              parenDepth++;
+            } else if (char === '[' || char === '{') {
+              if (parenDepth > 0) {
+                parenDepth--;
+              } else {
+                break;
+              }
+            } else if (parenDepth === 0) {
+              // Stop at statement/expression boundaries
+              // Don't stop at ==, !=, <=, >=, +=, -=, *=, /=
+              const prevChar = result[condStart - 2];
+              if (char === '=' && prevChar !== '!' && prevChar !== '<' && prevChar !== '>' && prevChar !== '=' && prevChar !== '+' && prevChar !== '-' && prevChar !== '*' && prevChar !== '/') break;
+              if (char === ',' || char === ';' || char === '{') break;
+              // Newline check?
+              if (char === '\n') {
+                // Basic heuristic: check if line continuation
+                // (omitted for brevity, assume comma/semicolon catches most)
+              }
             }
 
-            // Skip leading whitespace
-            while (condStart < condEnd && /\s/.test(result[condStart])) condStart++;
+            condStart--;
           }
+
+          // Skip leading whitespace
+          while (condStart < condEnd && /\s/.test(result[condStart])) condStart++;
 
           // Now find the true value after ?
           let trueStart = i + 1;
@@ -1671,8 +1674,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
           let colonPos = trueStart;
           parenDepth = 0;
           while (colonPos < result.length) {
-            if (result[colonPos] === '(') parenDepth++;
-            if (result[colonPos] === ')') parenDepth--;
+            if (result[colonPos] === '(' || result[colonPos] === '[' || result[colonPos] === '{') parenDepth++;
+            if (result[colonPos] === ')' || result[colonPos] === ']' || result[colonPos] === '}') parenDepth--;
             if (result[colonPos] === ':' && parenDepth === 0) break;
             if (result[colonPos] === '?' && parenDepth === 0) break; // nested ternary
             colonPos++;
@@ -1690,8 +1693,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
           let falseEnd = falseStart;
           parenDepth = 0;
           while (falseEnd < result.length) {
-            if (result[falseEnd] === '(') parenDepth++;
-            if (result[falseEnd] === ')') {
+            if (result[falseEnd] === '(' || result[falseEnd] === '[' || result[falseEnd] === '{') parenDepth++;
+            if (result[falseEnd] === ')' || result[falseEnd] === ']' || result[falseEnd] === '}') {
               if (parenDepth === 0) break;
               parenDepth--;
             }
@@ -1942,52 +1945,98 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private fixSwitchCaseStatements(code: string): string {
-    // WGSL switch is different - cases need braces
-    // This is a simplified handler - complex switches may need manual review
-    let result = code;
+    // WGSL switch is different - cases need braces and support comma-separated lists for fallthrough
+    // We parse the switch body and reconstruct it
 
-    // Find all switch statements and process them individually
-    const switchRegex = /\bswitch\s*\(([^)]+)\)\s*\{/g;
+    // Find all switch statements
+    const switchPattern = /\bswitch\s*\(([^)]+)\)\s*\{/g;
     let match;
-    const switchRanges: Array<{ start: number, end: number }> = [];
+    const ranges: { start: number, end: number, headerEnd: number }[] = [];
 
-    while ((match = switchRegex.exec(result)) !== null) {
-      const switchStart = match.index;
-      const openBracePos = match.index + match[0].length - 1;
-
-      // Find matching closing brace
+    while ((match = switchPattern.exec(code)) !== null) {
+      const start = match.index;
+      const headerEnd = start + match[0].length;
       let depth = 1;
-      let pos = openBracePos + 1;
-      while (pos < result.length && depth > 0) {
-        if (result[pos] === '{') depth++;
-        else if (result[pos] === '}') depth--;
+      let pos = headerEnd;
+      while (pos < code.length && depth > 0) {
+        if (code[pos] === '{') depth++;
+        else if (code[pos] === '}') depth--;
         pos++;
       }
-
-      if (depth === 0) {
-        switchRanges.push({ start: switchStart, end: pos });
-      }
+      if (depth === 0) ranges.push({ start, end: pos, headerEnd });
     }
 
-    // Process in reverse order to maintain indices
-    for (let i = switchRanges.length - 1; i >= 0; i--) {
-      const { start, end } = switchRanges[i];
-      let switchCode = result.substring(start, end);
+    // Process from back to front
+    let result = code;
+    for (let i = ranges.length - 1; i >= 0; i--) {
+      const { start, end, headerEnd } = ranges[i];
+      const bodyContent = result.slice(headerEnd, end - 1); // Content inside { }
 
-      // Clean up switch syntax
-      switchCode = switchCode.replace(/\bswitch\s*\(([^)]+)\)\s*\{/, 'switch $1 {');
+      // Find all case/default labels
+      const labelMatches = Array.from(bodyContent.matchAll(/\b(case\s+([^:]+)|default)\s*:/g));
 
-      // case N: -> case N: {  (if not already braced)
-      switchCode = switchCode.replace(/\bcase\s+([^:]+):\s*([^{\n])/g, 'case $1: { $2');
+      if (labelMatches.length === 0) continue;
 
-      // break; at end of case -> } (close the case brace)
-      // Only replace breaks that come before case, default, or the switch's closing brace
-      switchCode = switchCode.replace(/\bbreak\s*;\s*(?=case|default|$)/g, '}\n');
+      let newBody = '\n';
+      let pendingCases: string[] = [];
+      let pendingDefault = false;
 
-      // default: -> default: {
-      switchCode = switchCode.replace(/\bdefault\s*:\s*([^{\n])/g, 'default: { $1');
+      for (let j = 0; j < labelMatches.length; j++) {
+        const m = labelMatches[j];
+        const isDefault = m[1].startsWith('default');
+        const value = m[2]?.trim(); // undefined for default
 
-      result = result.substring(0, start) + switchCode + result.substring(end);
+        // Content belonging to this case is from end of this label TO start of next label
+        const contentStart = m.index! + m[0].length;
+        const nextMatch = labelMatches[j + 1];
+        const contentEnd = nextMatch ? nextMatch.index! : bodyContent.length;
+        const content = bodyContent.slice(contentStart, contentEnd);
+
+        if (isDefault) pendingDefault = true;
+        else if (value) pendingCases.push(value);
+
+        // If content is effectively empty, it's a fallthrough (logic: merge with next)
+        // But valid content might be just comments. 
+        // Be careful: "case 0: // comment \n case 1:" -> content has definition but no code.
+        // WGSL requires brace. Empty brace is fine.
+        // If we treat it as fallthrough, we merge the selectors.
+
+        const hasCode = /[^ \t\r\n\/]/.test(content.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*/g, ''));
+
+        if (!hasCode && nextMatch) {
+          // Genuine fallthrough
+          continue;
+        }
+
+        // We have content (or it's the last case), emit block
+        // WGSL allows `case 0, 1: { ... }` and `default: { ... }`
+        // It does NOT allow `case 0, default: { ... }` in all versions? 
+        // Actually `default` must be alone or with cases? 
+        // Standard WGSL: `case selector_list: { compound_statement }` or `default: { compound_statement }`.
+        // `default` cannot be mixed with case selectors in list.
+
+        if (pendingCases.length > 0) {
+          newBody += `    case ${pendingCases.join(', ')}: {\n      ${content.trim()}\n    }\n`;
+        }
+        if (pendingDefault) {
+          // Duplicate content for default if it was mixed with cases?
+          // If we had `case 0: default: ...`, we emitted case 0 above. Now emit default.
+          // This effectively duplicates code, which is correct semantics if not allowed to mix.
+          newBody += `    default: {\n      ${content.trim()}\n    }\n`;
+        }
+
+        pendingCases = [];
+        pendingDefault = false;
+      }
+
+      // Reconstruct switch
+      let switchDecl = result.slice(start, headerEnd);
+      // switch(cond) -> switch cond
+      if (switchDecl.includes('(')) {
+        switchDecl = switchDecl.replace(/switch\s*\((.*)\)\s*\{/, 'switch $1 {');
+      }
+
+      result = result.substring(0, start) + switchDecl + newBody + '  }' + result.substring(end);
     }
 
     return result;
@@ -2134,7 +2183,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (size === 3) return `${v} = vec3<f32>(${v}.rgb + (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb + (${expr}), ${v}.w);`;
     });
-    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*-=?\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.rgb\s*-=\s*([^;]+);/g, (_, v, expr) => {
       const size = getVecSize(v);
       if (size === 3) return `${v} = vec3<f32>(${v}.rgb - (${expr}));`;
       return `${v} = vec4<f32>(${v}.rgb - (${expr}), ${v}.w);`;
@@ -2157,7 +2206,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x + _sw.x, ${v}.y + _sw.y, ${v}.z); }`;
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x + _sw.x, ${v}.y + _sw.y, ${v}.z, ${v}.w); }`;
     });
-    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*-=?\s*([^;]+);/g, (_, v, expr) => {
+    result = result.replace(/(?<!\.)\b(\w+)\.xy\s*-=\s*([^;]+);/g, (_, v, expr) => {
       const size = getVecSize(v);
       if (size === 2) return `{ let _sw = ${expr}; ${v} = vec2<f32>(${v}.x - _sw.x, ${v}.y - _sw.y); }`;
       if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x - _sw.x, ${v}.y - _sw.y, ${v}.z); }`;
@@ -2193,6 +2242,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // .zw = expr (for vec4)
     result = result.replace(/(?<!\.)\b(\w+)\.zw\s*=\s*([^;]+);/g, (_, v, expr) => {
       return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, ${v}.y, _sw.x, _sw.y); }`;
+    });
+
+    // .yz = expr
+    result = result.replace(/(?<!\.)\b(\w+)\.yz\s*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(${v}.x, _sw.x, _sw.y); }`;
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(${v}.x, _sw.x, _sw.y, ${v}.w); }`;
+    });
+
+    // .xz = expr
+    result = result.replace(/(?<!\.)\b(\w+)\.xz\s*=\s*([^;]+);/g, (_, v, expr) => {
+      const size = getVecSize(v);
+      if (size === 3) return `{ let _sw = ${expr}; ${v} = vec3<f32>(_sw.x, ${v}.y, _sw.y); }`;
+      return `{ let _sw = ${expr}; ${v} = vec4<f32>(_sw.x, ${v}.y, _sw.y, ${v}.w); }`;
     });
 
     // Single component compound assignments
@@ -2443,7 +2506,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
   private collectVarTypesFromCode(code: string): Map<string, string> {
     const varTypes = new Map<string, string>(this.varTypes);
-    const declRegex = /\b(var|let|const)\s+(\w+)\s*:\s*(vec[234]<\w+>|f32|i32|u32|bool)\b/g;
+    const declRegex = /\b(var|let|const)\s+(\w+)\s*:\s*((?:vec[234]<\w+>)|(?:f32|i32|u32|bool)\b)/g;
     let match;
     while ((match = declRegex.exec(code)) !== null) {
       varTypes.set(match[2], match[3]);
@@ -2477,17 +2540,30 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       }
     }
 
-    const swizzleMatch = trimmed.match(/\.([xyzwrgba]{2,4})\b/);
-    if (swizzleMatch) {
-      const swizzle = swizzleMatch[1];
-      if (swizzle.length === 2) return 'vec2<f32>';
-      if (swizzle.length === 3) return 'vec3<f32>';
-      if (swizzle.length === 4) return 'vec4<f32>';
-    }
-
     if (/^[a-zA-Z_]\w*$/.test(trimmed)) {
       const known = varTypes.get(trimmed);
       if (known && known.startsWith('vec')) return known;
+    }
+
+    // If scalar func present, skip variable scan to avoid false positives (e.g. dot(v,v))
+    const hasScalarFunc = /\b(dot|length|distance|determinant)\s*\(/.test(trimmed);
+
+    // Heuristic: Scan for variables used in expression
+    if (!hasScalarFunc) {
+      const words = trimmed.match(/\b[a-zA-Z_]\w*\b/g);
+      if (words) {
+        for (const word of words) {
+          const type = varTypes.get(word);
+          if (type && type.startsWith('vec')) {
+            // Check if it's swizzled in the expression (simplified check)
+            // This prevents x.y from being treated as x (vec).
+            const swizzleRegex = new RegExp(`\\b${word}\\s*\\.`, 'g');
+            if (!swizzleRegex.test(trimmed)) {
+              return type;
+            }
+          }
+        }
+      }
     }
 
     return this.inferVectorType(trimmed);
@@ -2722,9 +2798,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private inferVectorType(expr: string): string | null {
-    if (/vec4|\.xyzw|\.rgba/.test(expr)) return 'vec4<f32>';
-    if (/vec3|\.xyz|\.rgb/.test(expr)) return 'vec3<f32>';
-    if (/vec2|\.xy|\.rg/.test(expr)) return 'vec2<f32>';
+    // If expression contains scalar reduction functions, ignore swizzles as they might be arguments
+    // Only trust explicit constructors
+    const hasScalarFunc = /\b(dot|length|distance|determinant)\s*\(/.test(expr);
+
+    if (hasScalarFunc) {
+      if (/vec4/.test(expr)) return 'vec4<f32>';
+      if (/vec3/.test(expr)) return 'vec3<f32>';
+      if (/vec2/.test(expr)) return 'vec2<f32>';
+      return null;
+    }
+
+    if (/vec4|\.(xyzw|rgba|stpq)\b/.test(expr)) return 'vec4<f32>';
+    if (/vec3|\.(xyz|rgb|stp)\b/.test(expr)) return 'vec3<f32>';
+    if (/vec2|\.(xy|rg|zw|st)\b/.test(expr)) return 'vec2<f32>';
     return null;
   }
 
@@ -2756,10 +2843,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   }
 
   private fixArrayDeclarations(code: string): string {
-    // C-style array declarations: float arr[3] -> var arr: array<f32, 3>
-    return code.replace(/\bvar\s+(\w+)\s*:\s*(\w+)\s*\[(\d+)\]/g, (_, name, type, size) => {
+    // Handle GLSL->WGSL artifact: var name[size]: type -> var name: array<type, size>
+    // This handles declarations like: var originOffsets[4]: vec2<f32>;
+    let result = code.replace(/\bvar\s+(\w+)\[(\d+)\]\s*:\s*([\w<>]+)/g, (_, name, size, type) => {
       return `var ${name}: array<${type}, ${size}>`;
     });
+
+    // Also handle C-style: var name: type[size]
+    result = result.replace(/\bvar\s+(\w+)\s*:\s*(\w+)\s*\[(\d+)\]/g, (_, name, type, size) => {
+      return `var ${name}: array<${type}, ${size}>`;
+    });
+
+    return result;
   }
 
   private fixFloatIndices(code: string): string {
@@ -2797,77 +2892,139 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       functionGroups.get(func.name)!.push(func);
     }
 
-    // Find overloaded functions (same name, multiple definitions)
+    // Function renaming (Phases 1 & 2)
     let result = code;
     const renamedFunctions = new Map<string, string>(); // old signature -> new name
+    const overloadedGroups: Array<{ funcName: string; funcs: typeof functions }> = [];
 
     for (const [funcName, funcs] of functionGroups) {
       if (funcs.length > 1) {
-        // This function is overloaded
-        // Sort by parameter count/complexity to ensure stable renaming
         funcs.sort((a, b) => a.index - b.index);
+        overloadedGroups.push({ funcName, funcs });
 
-        for (let i = 0; i < funcs.length; i++) {
-          const func = funcs[i];
-          // Generate a unique name based on parameter types
+        for (const func of funcs) {
           const paramTypes = this.extractParameterTypes(func.params);
           const suffix = paramTypes.join('_').replace(/[<>]/g, '_').replace(/__+/g, '_');
           const newName = `${funcName}_${suffix}`;
 
           renamedFunctions.set(`${funcName}(${func.params})`, newName);
 
-          // Replace function declaration
           const oldDecl = `fn ${funcName}(${func.params})`;
           const newDecl = `fn ${newName}(${func.params})`;
           result = result.replace(oldDecl, newDecl);
         }
+      }
+    }
 
-        // Replace all calls to the overloaded function
-        // This is tricky because we need to determine which overload is being called
-        // For now, use a simple heuristic based on argument types
-        const callPattern = new RegExp(`\\b${funcName}\\s*\\(`, 'g');
-        let callMatch;
-        const replacements: Array<{ start: number; end: number; newName: string }> = [];
+    if (overloadedGroups.length === 0) return result;
 
-        while ((callMatch = callPattern.exec(result)) !== null) {
-          const callStart = callMatch.index;
-          const parenStart = callStart + callMatch[0].length - 1;
-          const parenEnd = this.findMatchingParen(result, parenStart);
+    // Scan for scopes and variable types in the modified code (Phase 3)
+    const scopes: Array<{ start: number; end: number; vars: Map<string, string> }> = [];
+    const globalVars = this.collectVarTypesFromCode(result);
+    // Also include inputs/uniforms which might not be captured if they are struct members
+    // Helper to add uniforms? They are usually accessed via `uniforms.x` or inputs wrapper.
 
-          if (parenEnd === -1) continue;
+    const newFuncPattern = /fn\s+(\w+)\s*\(([^)]*)\)\s*->\s*([^{]+)\s*\{/g;
+    while ((match = newFuncPattern.exec(result)) !== null) {
+      const start = match.index;
+      const braceIndex = result.indexOf('{', start);
+      if (braceIndex !== -1) {
+        const end = this.findMatchingBrace(result, braceIndex);
+        if (end !== -1) {
+          const body = result.slice(braceIndex, end);
+          const scopeVars = new Map<string, string>();
 
-          const args = result.slice(parenStart + 1, parenEnd);
-          const argTypes = this.inferArgumentTypes(args);
+          // Collect local vars
+          const declRegex = /\b(var|let|const)\s+(\w+)\s*:\s*((?:vec[234]<\w+>)|(?:f32|i32|u32|bool)\b)/g;
+          let vMatch;
+          while ((vMatch = declRegex.exec(body)) !== null) {
+            scopeVars.set(vMatch[2], vMatch[3]);
+          }
 
-          // Find best matching overload
-          let bestMatch: string | null = null;
-          for (const [signature, newName] of renamedFunctions) {
-            if (signature.startsWith(`${funcName}(`)) {
-              const params = signature.slice(funcName.length + 1, -1);
-              const paramTypes = this.extractParameterTypes(params);
+          // Collect params
+          const params = match[2];
+          const paramRegex = /\b(\w+)\s*:\s*((?:vec[234]<\w+>)|(?:f32|i32|u32|bool)\b)/g;
+          let pMatch;
+          while ((pMatch = paramRegex.exec(params)) !== null) {
+            scopeVars.set(pMatch[1], pMatch[2]);
+          }
 
-              // Simple matching: check if argument count matches
-              if (argTypes.length === paramTypes.length) {
+          scopes.push({ start, end, vars: scopeVars });
+        }
+      }
+    }
+
+    // Fix calls (Phase 4)
+    for (const { funcName } of overloadedGroups) {
+      const callPattern = new RegExp(`\\b${funcName}\\s*\\(`, 'g');
+      let callMatch;
+      const replacements: Array<{ start: number; end: number; newName: string }> = [];
+
+      while ((callMatch = callPattern.exec(result)) !== null) {
+        const callStart = callMatch.index;
+        const parenStart = callStart + callMatch[0].length - 1;
+        const parenEnd = this.findMatchingParen(result, parenStart);
+
+        if (parenEnd === -1) continue;
+
+        // Determine effective variable types for this call context
+        let effectiveVars = new Map(globalVars);
+        const currentScope = scopes.find(s => callStart >= s.start && callStart < s.end);
+        if (currentScope) {
+          for (const [k, v] of currentScope.vars) {
+            effectiveVars.set(k, v);
+          }
+        }
+
+        const args = result.slice(parenStart + 1, parenEnd);
+        const argTypes = this.inferArgumentTypes(args, effectiveVars);
+
+        let bestMatch: string | null = null;
+        let bestScore = -1;
+
+        for (const [signature, newName] of renamedFunctions) {
+          if (signature.startsWith(`${funcName}(`)) {
+            const params = signature.slice(funcName.length + 1, -1);
+            const paramTypes = this.extractParameterTypes(params);
+
+            if (argTypes.length === paramTypes.length) {
+              let score = 0;
+              let compatible = true;
+
+              for (let k = 0; k < argTypes.length; k++) {
+                const argType = argTypes[k];
+                const paramType = paramTypes[k].trim();
+
+                if (argType === 'unknown') {
+                  score += 1;
+                } else if (argType === paramType) {
+                  score += 10;
+                } else {
+                  compatible = false;
+                  break;
+                }
+              }
+
+              if (compatible && score > bestScore) {
                 bestMatch = newName;
-                break;
+                bestScore = score;
               }
             }
           }
-
-          if (bestMatch) {
-            replacements.push({
-              start: callStart,
-              end: callStart + funcName.length,
-              newName: bestMatch,
-            });
-          }
         }
 
-        // Apply replacements in reverse order to maintain indices
-        for (let i = replacements.length - 1; i >= 0; i--) {
-          const { start, end, newName } = replacements[i];
-          result = result.slice(0, start) + newName + result.slice(end);
+        if (bestMatch) {
+          replacements.push({
+            start: callStart,
+            end: callStart + funcName.length,
+            newName: bestMatch,
+          });
         }
+      }
+
+      for (let i = replacements.length - 1; i >= 0; i--) {
+        const { start, end, newName } = replacements[i];
+        result = result.slice(0, start) + newName + result.slice(end);
       }
     }
 
@@ -2885,7 +3042,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     });
   }
 
-  private inferArgumentTypes(args: string): string[] {
+  private inferArgumentTypes(args: string, varTypes?: Map<string, string>): string[] {
     // Infer types from arguments (simple heuristic)
     if (!args.trim()) return [];
 
@@ -2896,6 +3053,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
       if (/^vec[234]\s*\(/.test(arg)) return arg.match(/^(vec[234])/)?.[1] || 'unknown';
       if (/^\d+\./.test(arg)) return 'f32';
       if (/^\d+$/.test(arg)) return 'i32';
+      // Use expression analysis if varTypes is available
+      if (varTypes) {
+        const inferred = this.getExpressionVectorType(arg, varTypes);
+        if (inferred) return inferred;
+      }
       return 'unknown';
     });
   }
