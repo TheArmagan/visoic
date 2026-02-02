@@ -758,7 +758,7 @@
       variant="outline"
       size="sm"
       onclick={toggleRuntime}
-      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+      class="bg-neutral-900 border-neutral-700"
     >
       {isRunning ? "⏹️ Stop" : "▶️ Play"}
     </Button>
@@ -767,7 +767,7 @@
       variant="outline"
       size="sm"
       onclick={() => serialization.clear()}
-      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+      class="bg-neutral-900 border-neutral-700"
     >
       🗑️ Clear
     </Button>
@@ -776,7 +776,7 @@
       variant="outline"
       size="sm"
       onclick={() => serialization.exportToFile()}
-      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+      class="bg-neutral-900 border-neutral-700"
     >
       💾 Save
     </Button>
@@ -785,7 +785,7 @@
       variant="outline"
       size="sm"
       onclick={() => serialization.importFromFile()}
-      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+      class="bg-neutral-900 border-neutral-700"
     >
       📂 Load
     </Button>
@@ -794,7 +794,7 @@
       variant="outline"
       size="sm"
       onclick={toggleAutoSave}
-      class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700 {autoSaveEnabled
+      class="bg-neutral-900 border-neutral-700 {autoSaveEnabled
         ? 'border-green-500 text-green-400'
         : ''}"
       title={autoSaveEnabled
@@ -810,7 +810,7 @@
         variant="outline"
         size="sm"
         onclick={() => (showLayoutMenu = !showLayoutMenu)}
-        class="bg-neutral-900/80 backdrop-blur-sm border-neutral-700"
+        class="bg-neutral-900 border-neutral-700"
       >
         📐 Layout
       </Button>
@@ -889,7 +889,7 @@
 
   <!-- Stats -->
   <div
-    class="absolute top-4 right-4 z-10 px-3 py-2 bg-neutral-900/80 backdrop-blur-sm border border-neutral-700 rounded-lg text-xs text-neutral-400 space-y-1"
+    class="absolute top-4 right-4 z-10 px-3 py-2 bg-neutral-900 border border-neutral-700 rounded-lg text-xs text-neutral-400 space-y-1"
   >
     <div>Nodes: {nodes.length}</div>
     <div>Edges: {edges.length}</div>

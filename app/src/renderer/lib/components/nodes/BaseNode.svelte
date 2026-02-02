@@ -27,7 +27,10 @@
   const categoryInfo = $derived(NODE_CATEGORIES[data.category]);
   const editorContext = getNodeEditorContext();
 
-  function handleOutputDoubleClick(handle: HandleDefinition, event: MouseEvent) {
+  function handleOutputDoubleClick(
+    handle: HandleDefinition,
+    event: MouseEvent,
+  ) {
     editorContext?.onOutputHandleDoubleClick?.(id, handle, event);
   }
 </script>
@@ -35,7 +38,7 @@
 <div
   class={cn(
     "min-w-[180px] rounded-lg border shadow-lg transition-all",
-    "bg-neutral-900/95 backdrop-blur-sm",
+    "bg-neutral-900",
     selected
       ? "border-white/30 shadow-xl ring-2 ring-white/10"
       : "border-neutral-700/50",
@@ -81,9 +84,9 @@
       <div class="flex flex-col gap-1 mt-2">
         {#each data.outputs as output (output.id)}
           <div class="flex justify-end">
-            <NodeHandle 
-              handle={output} 
-              type="source" 
+            <NodeHandle
+              handle={output}
+              type="source"
               onHandleDoubleClick={handleOutputDoubleClick}
             />
           </div>
