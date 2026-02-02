@@ -41,7 +41,7 @@ export { BUILTIN_UNIFORMS } from './types';
 
 // Classes
 export { EventEmitter } from './event-emitter';
-export { ISFParser, isfParser } from './isf-parser';
+export { ISFParser, isfParser, ISFToWGSLCompiler, type CompilerOutput } from './isf-parser';
 export { ShaderLayer } from './shader-layer';
 export { RenderContext } from './render-context';
 export { ShaderManager, shaderManager } from './shader-manager';

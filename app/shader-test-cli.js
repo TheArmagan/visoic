@@ -40,17 +40,10 @@ function logResult(result) {
     fixed: 'yellow',
     skipped: 'gray',
   };
-  const statusSymbols = {
-    success: '✓',
-    error: '✗',
-    fixed: '⚙',
-    skipped: '○',
-  };
 
   const color = statusColors[result.status] || 'reset';
-  const symbol = statusSymbols[result.status] || '?';
 
-  log(`${symbol} ${result.shaderName} (${result.category}) - ${result.duration.toFixed(0)}ms`, color);
+  log(`${result.shaderName} (${result.category}) - ${result.duration.toFixed(0)}ms`, color);
 
   if (result.error) {
     log(`  Error: ${result.error.split('\n')[0]}`, 'red');
@@ -63,16 +56,16 @@ function logProgress(progress) {
 }
 
 function logSummary(result) {
-  log('\n═══════════════════════════════════════', 'bright');
+  log('\n---------------------------------------', 'bright');
   log('Test Suite Complete', 'bright');
-  log('═══════════════════════════════════════', 'bright');
+  log('---------------------------------------', 'bright');
   log(`Total: ${result.totalShaders}`);
   log(`Passed: ${result.passed}`, 'green');
   log(`Failed: ${result.failed}`, result.failed > 0 ? 'red' : 'reset');
   log(`Fixed: ${result.fixed}`, result.fixed > 0 ? 'yellow' : 'reset');
   log(`Skipped: ${result.skipped}`, 'gray');
   log(`Duration: ${(result.duration / 1000).toFixed(1)}s`);
-  log('═══════════════════════════════════════\n', 'bright');
+  log('---------------------------------------\n', 'bright');
 }
 
 class ShaderTestCLI {
@@ -140,9 +133,9 @@ class ShaderTestCLI {
           logResult(message.payload);
         }
         if (this.detailed && message.payload.wgsl) {
-          log('\n───────────── Compiled WGSL ─────────────', 'cyan');
+          log('\n------------- Compiled WGSL -------------', 'cyan');
           console.log(message.payload.wgsl);
-          log('──────────────────────────────────────────\n', 'cyan');
+          log('------------------------------------------\n', 'cyan');
         }
         break;
       case 'complete':
@@ -183,7 +176,7 @@ class ShaderTestCLI {
     log('Window reloaded', 'green');
 
     // 2. Wait a bit for app to initialize
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     // 3. Start test
     const payload = {
