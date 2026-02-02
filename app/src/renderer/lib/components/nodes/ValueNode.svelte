@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { ValueNodeData } from "$lib/api/nodes/types";
-  import { nodeGraph, useNodeProperty } from "$lib/api/nodes";
+  import { nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import { Switch } from "$lib/components/ui/switch";
   import { Input } from "$lib/components/ui/input";
@@ -14,12 +15,30 @@
   }
 
   let props: Props = $props();
-  const data = $derived(props.data);
+
+  // Reactive data state - poll from nodeGraph for real-time updates
+  let liveData = $state<ValueNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    // Poll for updates at 20fps
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as ValueNodeData;
+      }
+    }, 50);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  const data = $derived(liveData);
   const { updateNodeData } = useSvelteFlow();
 
-  // Subscribe to value changes from nodeGraph (for external updates)
-  const valueProperty = useNodeProperty<ValueNodeData, "value">(props.id, "value");
-  const reactiveValue = $derived(valueProperty.value ?? data.value);
+  // Use reactive value from live data
+  const reactiveValue = $derived(data.value);
 
   // Use refs for inputs to avoid controlled input lag
   let numberInputRef = $state<HTMLInputElement | null>(null);
@@ -214,5 +233,3 @@
     </div>
   {/if}
 </BaseNode>
-
-

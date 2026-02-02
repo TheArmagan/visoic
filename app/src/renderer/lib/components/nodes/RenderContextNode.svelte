@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import type { RenderContextNodeData } from "$lib/api/nodes/types";
-  import { renderContextRuntime, nodeGraph, useNodeData } from "$lib/api/nodes";
+  import { renderContextRuntime, nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import { Label } from "$lib/components/ui/label";
   import { Input } from "$lib/components/ui/input";
@@ -15,16 +15,31 @@
 
   let props: Props = $props();
 
-  // Subscribe to this node's data changes for reactive updates
-  const nodeData = useNodeData<RenderContextNodeData>(props.id);
-  const data = $derived(nodeData.data ?? props.data);
+  // Reactive data state - poll from nodeGraph for real-time updates
+  let liveData = $state<RenderContextNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    // Create context when mounted
+    renderContextRuntime.createContext(props.id);
+
+    // Poll for updates at 20fps
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as RenderContextNodeData;
+      }
+    }, 50);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  // Use live data for display
+  const data = $derived(liveData);
 
   const { updateNodeData } = useSvelteFlow();
-
-  // Create context when mounted
-  onMount(async () => {
-    await renderContextRuntime.createContext(props.id);
-  });
 
   function updateConfig(key: string, value: number) {
     const updates = {
@@ -43,9 +58,7 @@
 
 <BaseNode {...props}>
   {#snippet headerExtra()}
-    <span
-      class="text-[9px] px-1.5 py-0.5 bg-pink-500/20 text-pink-300 rounded"
-    >
+    <span class="text-[9px] px-1.5 py-0.5 bg-pink-500/20 text-pink-300 rounded">
       Renderer
     </span>
   {/snippet}

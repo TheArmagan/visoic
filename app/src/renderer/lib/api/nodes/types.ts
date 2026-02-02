@@ -237,7 +237,7 @@ export const NODE_CATEGORIES: Record<NodeCategory, NodeCategoryInfo> = {
 
 export interface BaseNodeData {
   /** Index signature for SvelteFlow compatibility */
-  [key: string]: unknown;
+  [key: string]: any;
   /** Display label for the node */
   label: string;
   /** Node category */
@@ -247,9 +247,9 @@ export interface BaseNodeData {
   /** Output handle definitions */
   outputs: OutputHandle[];
   /** Current input values (from connections or defaults) */
-  inputValues: Record<string, unknown>;
+  inputValues: Record<string, any>;
   /** Current output values (computed) */
-  outputValues: Record<string, unknown>;
+  outputValues: Record<string, any>;
   /** Whether the node has errors */
   hasError?: boolean;
   /** Error message if any */

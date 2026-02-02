@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { UtilityNodeData } from "$lib/api/nodes/types";
-  import { nodeGraph, useNodeProperty } from "$lib/api/nodes";
+  import { nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import * as Select from "$lib/components/ui/select";
   import { Input } from "$lib/components/ui/input";
@@ -16,14 +17,29 @@
 
   let props: Props = $props();
 
-  // Use props.data for config values (user editable)
-  const data = $derived(props.data);
+  // Reactive data state - poll from nodeGraph for real-time updates
+  let liveData = $state<UtilityNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Subscribe to outputValues changes from nodeGraph (runtime computed values)
-  const outputValues = useNodeProperty<UtilityNodeData, "outputValues">(
-    props.id,
-    "outputValues",
-  );
+  onMount(() => {
+    // Poll for updates at 30fps for smooth display
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as UtilityNodeData;
+      }
+    }, 33);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  // Use live data for display
+  const data = $derived(liveData);
+
+  // Get output values from live data
+  const outputValues = $derived(data.outputValues);
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -52,13 +68,11 @@
     updateNodeData(props.id, updates);
   }
 
-  // Use reactive outputValues from subscription
-  const time = $derived(outputValues.value?.time ?? 0);
-  const delta = $derived(outputValues.value?.delta ?? 0);
-  const frame = $derived(outputValues.value?.frame ?? 0);
-  const value = $derived(
-    outputValues.value?.value ?? outputValues.value?.smoothed ?? 0,
-  );
+  // Use reactive outputValues from live data
+  const time = $derived(outputValues?.time ?? 0);
+  const delta = $derived(outputValues?.delta ?? 0);
+  const frame = $derived(outputValues?.frame ?? 0);
+  const value = $derived(outputValues?.value ?? outputValues?.smoothed ?? 0);
 
   const wrapModes = [
     { value: "clamp", label: "Clamp" },
@@ -311,8 +325,8 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.oscillatorConfig) {
-              node.data.oscillatorConfig.frequency = val;
+            if (node && (node.data.oscillatorConfig as any)) {
+              (node.data.oscillatorConfig as any).frequency = val;
             }
           }}
           onchange={(e) =>
@@ -334,8 +348,8 @@
           oninput={(e) => {
             const val = parseFloat((e.target as HTMLInputElement).value);
             const node = nodeGraph.getNode(props.id);
-            if (node && node.data.oscillatorConfig) {
-              node.data.oscillatorConfig.phase = val;
+            if (node && (node.data.oscillatorConfig as any)) {
+              (node.data.oscillatorConfig as any).phase = val;
             }
           }}
           onchange={(e) =>
@@ -360,8 +374,8 @@
             oninput={(e) => {
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && node.data.oscillatorConfig) {
-                node.data.oscillatorConfig.pulseWidth = val;
+              if (node && (node.data.oscillatorConfig as any)) {
+                (node.data.oscillatorConfig as any).pulseWidth = val;
               }
             }}
             onchange={(e) =>
@@ -419,7 +433,7 @@
           value={data.triggerConfig?.mode ?? "rising"}
           onValueChange={(v) =>
             updateData({
-              triggerConfig: { ...data.triggerConfig, mode: v },
+              triggerConfig: { ...data.triggerConfig, mode: v as any },
             })}
         >
           <Select.Trigger
@@ -463,11 +477,11 @@
       <!-- Trigger indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-yellow-500={outputValues.value?.triggered}
-        class:bg-neutral-800={!outputValues.value?.triggered}
+        class:bg-yellow-500={outputValues?.triggered}
+        class:bg-neutral-800={!outputValues?.triggered}
       >
         <span class="text-xs font-bold">
-          {outputValues.value?.triggered ? "TRIGGERED" : "—"}
+          {outputValues?.triggered ? "TRIGGERED" : "—"}
         </span>
       </div>
     </div>
@@ -568,20 +582,16 @@
       <!-- Active indicator -->
       <div
         class="h-6 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-green-500={outputValues.value?.active}
-        class:bg-neutral-800={!outputValues.value?.active}
+        class:bg-green-500={outputValues?.active}
+        class:bg-neutral-800={!outputValues?.active}
       >
         <span class="text-xs font-bold">
-          {outputValues.value?.active ? "ACTIVE" : "—"}
+          {outputValues?.active ? "ACTIVE" : "—"}
         </span>
       </div>
       <div class="flex justify-between text-[10px] text-neutral-500 font-mono">
         <span>Trigger: {data.inputValues?.trigger ? "ON" : "OFF"}</span>
-        <span
-          >Value: {((outputValues.value?.value as number) ?? 0).toFixed(
-            2,
-          )}</span
-        >
+        <span>Value: {((outputValues?.value as number) ?? 0).toFixed(2)}</span>
       </div>
     </div>
   {:else}

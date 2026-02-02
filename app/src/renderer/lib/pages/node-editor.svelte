@@ -37,9 +37,9 @@
 
   // State - use any to bypass strict SvelteFlow type checking
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let nodes = $state.raw<any[]>([]);
+  let nodes = $state<any[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let edges = $state.raw<any[]>([]);
+  let edges = $state<any[]>([]);
 
   // Initialize nodes/edges with type sync
   {
@@ -81,6 +81,10 @@
   let isInteracting = $state(false);
   let graphSyncTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Track node positions changed by UI to prevent sync override
+  let pendingPositionUpdates = new Map<string, { x: number; y: number }>();
+  let lastSyncTime = 0;
+
   // Hooks
   const nodeOps = useNodeOperations();
   const edgeOps = useEdgeOperations();
@@ -88,6 +92,9 @@
 
   // Store cleanup function
   let statsInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Force UI refresh counter - used to trigger reactive updates
+  let forceRefreshCounter = $state(0);
 
   // Initialize runtime
   onMount(() => {
@@ -111,13 +118,15 @@
       isRunning = true;
     });
 
-    // Update stats and sync runtime values periodically
+    // Update stats periodically - also forces UI reactivity for realtime values
     statsInterval = setInterval(() => {
       if (nodeRuntime.running) {
         frameCount = nodeRuntime.currentFrame;
         currentTime = nodeRuntime.currentTime;
+        // Increment counter to trigger any derived computations
+        forceRefreshCounter++;
       }
-    }, 100);
+    }, 50); // 20fps for stats update
   });
 
   onDestroy(() => {
@@ -132,7 +141,7 @@
   });
 
   // Debounced graph sync function
-  function syncNodesFromGraph() {
+  function syncNodesFromGraph(forceFullSync = false) {
     const currentNodes = nodeGraph.getNodes();
     // Ensure all node types are registered before updating state
     syncNodeTypesWithRegistry(currentNodes.map((n) => n.type));
@@ -140,9 +149,31 @@
     // Create map of current UI nodes to preserve selection/drag state
     const uiNodeMap = new Map(nodes.map((n) => [n.id, n]));
 
-    nodes = currentNodes.map((graphNode) => {
+    // Check if this is just a data update (no structural changes)
+    const isStructuralChange =
+      currentNodes.length !== nodes.length ||
+      currentNodes.some((n) => !uiNodeMap.has(n.id));
+
+    const newNodes = currentNodes.map((graphNode) => {
       const uiNode = uiNodeMap.get(graphNode.id);
+
+      // Check for pending position update from UI
+      const pendingPos = pendingPositionUpdates.get(graphNode.id);
+
       if (uiNode) {
+        // Determine which position to use
+        let position = graphNode.position;
+
+        // If there's a pending position update or node is being dragged, use UI position
+        if (pendingPos) {
+          position = pendingPos;
+        } else if (uiNode.dragging) {
+          position = uiNode.position;
+        } else if (!forceFullSync && !isStructuralChange) {
+          // For data-only updates, keep UI position to prevent jumps
+          position = uiNode.position;
+        }
+
         return {
           ...graphNode,
           // Preserve UI-only state from Svelte Flow
@@ -153,20 +184,31 @@
           measured: uiNode.measured,
           width: uiNode.width,
           height: uiNode.height,
-          // If dragging, prefer UI position to avoid fighting
-          position: uiNode.dragging ? uiNode.position : graphNode.position,
+          position,
         };
       }
       return graphNode;
     });
 
+    // Only update if there are actual changes
+    nodes = newNodes;
+
     // Preserve edge selection state
     const currentEdges = nodeGraph.getEdges();
     const uiEdgeMap = new Map(edges.map((e) => [e.id, e]));
-    edges = currentEdges.map((graphEdge) => {
-      const uiEdge = uiEdgeMap.get(graphEdge.id);
-      return uiEdge ? { ...graphEdge, selected: uiEdge.selected } : graphEdge;
-    });
+
+    const isEdgeStructuralChange =
+      currentEdges.length !== edges.length ||
+      currentEdges.some((e) => !uiEdgeMap.has(e.id));
+
+    if (isEdgeStructuralChange || forceFullSync) {
+      edges = currentEdges.map((graphEdge) => {
+        const uiEdge = uiEdgeMap.get(graphEdge.id);
+        return uiEdge ? { ...graphEdge, selected: uiEdge.selected } : graphEdge;
+      });
+    }
+
+    lastSyncTime = Date.now();
   }
 
   // Subscribe to graph changes - debounced during interaction
@@ -182,7 +224,12 @@
       }, 100);
       return;
     }
-    syncNodesFromGraph();
+
+    // Debounce rapid updates
+    if (graphSyncTimer) clearTimeout(graphSyncTimer);
+    graphSyncTimer = setTimeout(() => {
+      syncNodesFromGraph();
+    }, 16); // ~60fps
   });
 
   // Toggle runtime
@@ -227,13 +274,41 @@
     }
   }
 
+  // Handle node drag start - track the node being dragged
+  function onNodeDragStart({
+    targetNode,
+  }: {
+    targetNode: { id: string; position: { x: number; y: number } };
+  }) {
+    isInteracting = true;
+    // Store the position as pending to prevent sync from overriding it
+    pendingPositionUpdates.set(targetNode.id, { ...targetNode.position });
+  }
+
+  // Handle node drag - update pending position
+  function onNodeDrag({
+    targetNode,
+  }: {
+    targetNode: { id: string; position: { x: number; y: number } };
+  }) {
+    pendingPositionUpdates.set(targetNode.id, { ...targetNode.position });
+  }
+
   // Handle node position changes
   function onNodeDragStop({
     targetNode,
   }: {
     targetNode: { id: string; position: { x: number; y: number } };
   }) {
+    isInteracting = false;
+
+    // Update graph with final position
     nodeOps.updateNode(targetNode.id, { position: targetNode.position });
+
+    // Clear pending after a short delay to ensure sync doesn't override
+    setTimeout(() => {
+      pendingPositionUpdates.delete(targetNode.id);
+    }, 100);
   }
 
   // Pane context menu state
@@ -567,11 +642,9 @@
       {isValidConnection}
       onconnect={onConnect}
       ondelete={onDelete}
-      onnodedragstart={() => (isInteracting = true)}
-      onnodedragstop={(e) => {
-        isInteracting = false;
-        onNodeDragStop(e);
-      }}
+      onnodedragstart={onNodeDragStart}
+      onnodedrag={onNodeDrag}
+      onnodedragstop={onNodeDragStop}
       onmovestart={() => (isInteracting = true)}
       onmoveend={() => {
         isInteracting = false;

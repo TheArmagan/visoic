@@ -237,8 +237,8 @@
             oninput={(e) => {
               const val = parseInt((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && node.data.windowConfig) {
-                node.data.windowConfig.monitor = val;
+              if (node && (node.data as any).windowConfig) {
+                (node.data as any).windowConfig.monitor = val;
               }
             }}
             onchange={(e) => updateWindowConfig("monitor", parseInt((e.target as HTMLInputElement).value))}
@@ -258,8 +258,8 @@
             oninput={(e) => {
               const val = parseInt((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && node.data.renderConfig) {
-                node.data.renderConfig.fps = val;
+              if (node && (node.data as any).renderConfig) {
+                (node.data as any).renderConfig.fps = val;
               }
             }}
             onchange={(e) => updateRenderConfig("fps", parseInt((e.target as HTMLInputElement).value))}
@@ -303,8 +303,8 @@
             oninput={(e) => {
               const val = parseInt((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && node.data.renderConfig) {
-                node.data.renderConfig.fps = val;
+              if (node && (node.data as any).renderConfig) {
+                (node.data as any).renderConfig.fps = val;
               }
             }}
             onchange={(e) => updateRenderConfig("fps", parseInt((e.target as HTMLInputElement).value))}

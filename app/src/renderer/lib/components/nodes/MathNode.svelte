@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { useSvelteFlow, useEdges } from "@xyflow/svelte";
   import type { MathNodeData } from "$lib/api/nodes/types";
-  import { nodeGraph, useNodeData } from "$lib/api/nodes";
+  import { nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
   import { Input } from "$lib/components/ui/input";
 
@@ -13,9 +14,26 @@
 
   let props: Props = $props();
 
-  // Subscribe to this node's data changes for reactive updates
-  const nodeData = useNodeData<MathNodeData>(props.id);
-  const data = $derived(nodeData.data ?? props.data);
+  // Reactive data state - poll from nodeGraph for real-time updates
+  let liveData = $state<MathNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    // Poll for updates at 30fps for smooth real-time display
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as MathNodeData;
+      }
+    }, 33);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  // Use live data for display
+  const data = $derived(liveData);
 
   const { updateNodeData } = useSvelteFlow();
   const edges = useEdges();
@@ -45,8 +63,8 @@
     new Set(
       edges.current
         .filter((e) => e.target === props.id)
-        .map((e) => e.targetHandle)
-    )
+        .map((e) => e.targetHandle),
+    ),
   );
 
   // Update input value
@@ -82,15 +100,18 @@
       {#each data.inputs as input (input.id)}
         {#if !connectedInputs.has(input.id)}
           <div class="flex items-center gap-1">
-            <span class="text-[10px] text-neutral-500 w-8 truncate">{input.label}</span>
+            <span class="text-[10px] text-neutral-500 w-8 truncate"
+              >{input.label}</span
+            >
             <Input
               type="number"
-              value={(data.inputValues?.[input.id] ?? getInputDefault(input.id)) as number}
+              value={(data.inputValues?.[input.id] ??
+                getInputDefault(input.id)) as number}
               step={0.1}
               oninput={(e) =>
                 updateInputValue(
                   input.id,
-                  parseFloat((e.target as HTMLInputElement).value) || 0
+                  parseFloat((e.target as HTMLInputElement).value) || 0,
                 )}
               class="h-5 text-[10px] bg-neutral-800 border-neutral-700 nodrag px-1 flex-1"
             />

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { ShaderNodeData } from "$lib/api/nodes/types";
   import { nodeGraph } from "$lib/api/nodes";
@@ -16,8 +17,26 @@
 
   let props: Props = $props();
 
-  // Use props.data directly - SvelteFlow handles reactivity
-  const data = $derived(props.data);
+  // Reactive data state - poll from nodeGraph for real-time updates
+  let liveData = $state<ShaderNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    // Poll for updates at 20fps for smooth slider display without excessive CPU
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as ShaderNodeData;
+      }
+    }, 50);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  // Use live data for display
+  const data = $derived(liveData);
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -91,8 +110,12 @@
             node.data.opacity = val;
           }
         }}
-        onchange={(e) => updateLayerSetting("opacity", parseFloat((e.target as HTMLInputElement).value))}
-        />
+        onchange={(e) =>
+          updateLayerSetting(
+            "opacity",
+            parseFloat((e.target as HTMLInputElement).value),
+          )}
+      />
 
       <div class="flex items-center gap-2 mt-2">
         <div class="flex-1">
@@ -105,9 +128,8 @@
             <Select.Trigger
               class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
             >
-              {blendModes.find(
-                (m) => m.value === (data.blendMode ?? "normal"),
-              )?.label ?? "Normal"}
+              {blendModes.find((m) => m.value === (data.blendMode ?? "normal"))
+                ?.label ?? "Normal"}
             </Select.Trigger>
             <Select.Content>
               {#each blendModes as mode}
@@ -141,20 +163,34 @@
       {#if input.dataType === "number" && input.values && input.labels}
         <!-- Long type with VALUES/LABELS - show as dropdown -->
         <div>
-          <Label class="text-[10px] text-neutral-400 block mb-1">{input.label}</Label>
+          <Label class="text-[10px] text-neutral-400 block mb-1"
+            >{input.label}</Label
+          >
           <Select.Root
             type="single"
-            value={String((value as number) ?? (input.defaultValue as number) ?? input.values[0])}
+            value={String(
+              (value as number) ??
+                (input.defaultValue as number) ??
+                input.values[0],
+            )}
             onValueChange={(v) => updateInputValue(input.id, parseInt(v))}
           >
             <Select.Trigger
               class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag w-full"
             >
-              {input.labels[input.values.indexOf((value as number) ?? (input.defaultValue as number) ?? input.values[0])] ?? `Value: ${value}`}
+              {input.labels[
+                input.values.indexOf(
+                  (value as number) ??
+                    (input.defaultValue as number) ??
+                    input.values[0],
+                )
+              ] ?? `Value: ${value}`}
             </Select.Trigger>
             <Select.Content>
               {#each input.values as val, idx}
-                <Select.Item value={String(val)}>{input.labels[idx] ?? val}</Select.Item>
+                <Select.Item value={String(val)}
+                  >{input.labels[idx] ?? val}</Select.Item
+                >
               {/each}
             </Select.Content>
           </Select.Root>
@@ -179,8 +215,12 @@
                 node.data.inputValues[input.id] = val;
               }
             }}
-            onchange={(e) => updateInputValue(input.id, parseFloat((e.target as HTMLInputElement).value))}
-            />
+            onchange={(e) =>
+              updateInputValue(
+                input.id,
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
         </div>
       {:else if input.dataType === "color"}
         <div>
@@ -267,5 +307,3 @@
     {/if}
   </div>
 </BaseNode>
-
-

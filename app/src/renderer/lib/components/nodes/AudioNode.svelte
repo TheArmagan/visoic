@@ -1,8 +1,8 @@
 <script lang="ts">
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { AudioNodeData } from "$lib/api/nodes/types";
-  import { nodeGraph, nodeRuntime, useNodeProperty } from "$lib/api/nodes";
-  import { onMount } from "svelte";
+  import { nodeGraph, nodeRuntime } from "$lib/api/nodes";
+  import { onMount, onDestroy } from "svelte";
   import BaseNode from "./BaseNode.svelte";
   import * as Select from "$lib/components/ui/select";
   import { Input } from "$lib/components/ui/input";
@@ -17,14 +17,29 @@
 
   let props: Props = $props();
 
-  // Use props.data for config values (user editable)
-  const data = $derived(props.data);
+  // Reactive data state - poll from nodeGraph for real-time updates (especially outputValues)
+  let liveData = $state<AudioNodeData>(props.data);
+  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  // Subscribe to outputValues changes from nodeGraph (runtime computed values)
-  const outputValues = useNodeProperty<AudioNodeData, "outputValues">(
-    props.id,
-    "outputValues",
-  );
+  onMount(() => {
+    // Poll for updates at 30fps for smooth audio visualization
+    updateInterval = setInterval(() => {
+      const node = nodeGraph.getNode(props.id);
+      if (node) {
+        liveData = node.data as AudioNodeData;
+      }
+    }, 33);
+  });
+
+  onDestroy(() => {
+    if (updateInterval) clearInterval(updateInterval);
+  });
+
+  // Use live data for display
+  const data = $derived(liveData);
+
+  // Get reactive output values from live data
+  const outputValues = $derived(data.outputValues);
 
   const { updateNodeData } = useSvelteFlow();
 
@@ -221,7 +236,7 @@
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((outputValues.value?.volume as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.volume as number) ?? 0) * 100}%"
         ></div>
       </div>
     </div>
@@ -397,7 +412,7 @@
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-linear-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
-          style="width: {((outputValues.value?.volume as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.volume as number) ?? 0) * 100}%"
         ></div>
       </div>
     </div>
@@ -514,7 +529,7 @@
       <div class="text-center border-t border-neutral-700 pt-2">
         <span class="text-[10px] text-neutral-500">Gain:</span>
         <span class="text-xs font-mono text-green-400 ml-1">
-          {((outputValues.value?.gain as number) ?? 1).toFixed(3)}
+          {((outputValues?.gain as number) ?? 1).toFixed(3)}
         </span>
       </div>
     </div>
@@ -558,11 +573,11 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {:else if data.audioType === "frequency-range"}
@@ -676,11 +691,11 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-orange-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {:else if data.audioType === "amplitude" || data.audioType === "rms"}
@@ -711,18 +726,18 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-green-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {:else if data.audioType === "peak"}
     <div class="space-y-2">
       <div class="text-[10px] text-neutral-400">
         Peak Frequency: <span class="text-white font-mono">
-          {((outputValues.value?.frequency as number) ?? 0).toFixed(0)} Hz
+          {((outputValues?.frequency as number) ?? 0).toFixed(0)} Hz
         </span>
       </div>
       <!-- Peak visualization -->
@@ -730,26 +745,26 @@
         <div
           class="h-full bg-purple-500 transition-all"
           style="width: {Math.min(
-            ((outputValues.value?.value as number) ?? 0) * 100,
+            ((outputValues?.value as number) ?? 0) * 100,
             100,
           )}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Level: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
+        Level: {((outputValues?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {:else if data.audioType === "bpm"}
     <div class="space-y-2">
       <div class="text-center">
         <span class="text-2xl font-bold text-orange-400">
-          {((outputValues.value?.bpm as number) ?? 0).toFixed(0)}
+          {((outputValues?.bpm as number) ?? 0).toFixed(0)}
         </span>
         <span class="text-xs text-neutral-500"> BPM</span>
       </div>
       <div class="text-[10px] text-neutral-400 text-center">
         Confidence: {(
-          ((outputValues.value?.confidence as number) ?? 0) * 100
+          ((outputValues?.confidence as number) ?? 0) * 100
         ).toFixed(0)}%
       </div>
     </div>
@@ -783,15 +798,15 @@
       <!-- Beat indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-red-500={outputValues.value?.detected}
-        class:bg-neutral-800={!outputValues.value?.detected}
+        class:bg-red-500={outputValues?.detected}
+        class:bg-neutral-800={!outputValues?.detected}
       >
         <span class="text-xs font-bold">
-          {outputValues.value?.detected ? "BEAT!" : "—"}
+          {outputValues?.detected ? "BEAT!" : "—"}
         </span>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Intensity: {((outputValues.value?.intensity as number) ?? 0).toFixed(3)}
+        Intensity: {((outputValues?.intensity as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {:else if data.audioType === "kick" || data.audioType === "snare" || data.audioType === "hihat" || data.audioType === "clap"}
@@ -995,25 +1010,20 @@
       <!-- Detection indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
-        class:bg-purple-500={outputValues.value?.detected}
-        class:bg-neutral-800={!outputValues.value?.detected}
+        class:bg-purple-500={outputValues?.detected}
+        class:bg-neutral-800={!outputValues?.detected}
       >
         <span class="text-xs font-bold">
-          {outputValues.value?.detected
-            ? data.audioType.toUpperCase() + "!"
-            : "—"}
+          {outputValues?.detected ? data.audioType.toUpperCase() + "!" : "—"}
         </span>
       </div>
       <div class="flex justify-between text-[10px] text-neutral-500 font-mono">
         <span
-          >Intensity: {((outputValues.value?.intensity as number) ?? 0).toFixed(
+          >Intensity: {((outputValues?.intensity as number) ?? 0).toFixed(
             2,
           )}</span
         >
-        <span
-          >Energy: {((outputValues.value?.energy as number) ?? 0).toFixed(
-            3,
-          )}</span
+        <span>Energy: {((outputValues?.energy as number) ?? 0).toFixed(3)}</span
         >
       </div>
     </div>
@@ -1051,11 +1061,11 @@
       <div class="h-4 bg-neutral-800 rounded overflow-hidden">
         <div
           class="h-full bg-cyan-500 transition-all"
-          style="width: {((outputValues.value?.value as number) ?? 0) * 100}%"
+          style="width: {((outputValues?.value as number) ?? 0) * 100}%"
         ></div>
       </div>
       <span class="text-[10px] text-neutral-500 font-mono">
-        Value: {((outputValues.value?.value as number) ?? 0).toFixed(3)}
+        Value: {((outputValues?.value as number) ?? 0).toFixed(3)}
       </span>
     </div>
   {/if}
