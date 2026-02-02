@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('VISOICNative', {
   send: (channel: string, data: unknown) => {
     ipcRenderer.send(channel, data);
   },
+  openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+  getVersion: (): Promise<string> => ipcRenderer.invoke('app:getVersion'),
   receive: (channel: string, func: (...args: unknown[]) => void) => {
     ipcRenderer.on(channel, (_event, ...args) => func(...args));
   },

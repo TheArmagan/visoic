@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog, shell } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -122,6 +122,22 @@ function createWindow() {
 
   ipcMain.on('frame-close', () => {
     mainWindow.close();
+  });
+
+  // ==========================================
+  // App Info API
+  // ==========================================
+
+  ipcMain.handle('app:getVersion', () => {
+    return app.getVersion();
+  });
+
+  // ==========================================
+  // Shell API
+  // ==========================================
+
+  ipcMain.handle('shell:openExternal', async (_event, url: string) => {
+    await shell.openExternal(url);
   });
 
   // ==========================================

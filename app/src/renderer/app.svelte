@@ -9,6 +9,8 @@
 
   const currentPage = $derived($router.currentPage);
 
+  let version = $state("...");
+
   const routes = [
     {
       name: "Nodes",
@@ -18,10 +20,17 @@
       name: "Shader Test",
       to: "/shader-test",
     },
+    {
+      name: "About",
+      to: "/about",
+    },
   ];
 
   onMount(() => {
     configManager.initialize().catch(() => {});
+    (window as any).VISOICNative.getVersion().then((v: string) => {
+      version = v;
+    });
   });
 </script>
 
@@ -71,6 +80,6 @@
     <currentPage.component />
   </div>
   <code class="fixed bottom-0 right-0 p-2 text-xs text-white/50"
-    >v0.0.10-dev.4</code
+    >v{version}</code
   >
 </main>

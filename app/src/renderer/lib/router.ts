@@ -5,6 +5,8 @@ import { get, writable } from 'svelte/store';
 import NodeEditorPage from '$lib/pages/node-editor.svelte';
 // @ts-ignore
 import ShaderTestPage from '$lib/pages/shader-test.svelte';
+// @ts-ignore
+import AboutPage from '$lib/pages/about.svelte';
 
 export type RouterState = {
   routes: Record<string, Component>;
@@ -19,6 +21,7 @@ const initial: RouterState = {
   routes: {
     '/node-editor': NodeEditorPage,
     '/shader-test': ShaderTestPage,
+    '/about': AboutPage,
   },
   currentPage: {
     path: '/node-editor',

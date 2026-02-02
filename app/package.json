@@ -1,6 +1,6 @@
 {
   "name": "visoic",
-  "version": "0.0.10.4",
+  "version": "0.0.10.5",
   "description": "Visoic - Visualize the unseen world of sound with WebGPU-powered audio visualizations.",
   "type": "module",
   "main": "dist/main.cjs",
@@ -23,8 +23,7 @@
     "typescript",
     "shadcn"
   ],
-  "author": "",
-  "license": "MIT",
+  "author": "Kıraç Armağan Önal",
   "devDependencies": {
     "@internationalized/date": "^3.10.0",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
