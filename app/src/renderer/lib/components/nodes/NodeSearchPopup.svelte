@@ -223,7 +223,7 @@
     </div>
 
     <!-- Results -->
-    <div class="overflow-y-auto max-h-[420px]">
+    <div class="overflow-y-auto max-h-105">
       {#if filteredNodes.length === 0}
         <div class="p-4 text-center text-neutral-500 text-sm">
           No nodes found
