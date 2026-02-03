@@ -348,8 +348,16 @@ export interface AudioNodeData extends BaseNodeData {
   category: 'audio';
   /** Audio node subtype */
   audioType: 'device' | 'analyzer' | 'normalizer' | 'fft' | 'band' | 'frequency-range' | 'amplitude' | 'rms' | 'peak' | 'bpm' | 'beat' | 'kick' | 'snare' | 'hihat' | 'clap';
+  /** Audio source type: microphone, desktop (full system), application (specific window/app) */
+  sourceType?: 'microphone' | 'desktop' | 'application';
+  /** Desktop source ID from Electron's desktopCapturer (for desktop/application capture) */
+  desktopSourceId?: string;
+  /** Desktop source name for display */
+  desktopSourceName?: string;
   /** Device ID if applicable */
   deviceId?: string;
+  /** Listen mode - output audio to speakers */
+  listen?: boolean;
   /** Frequency band preset */
   frequencyBand?: 'subBass' | 'bass' | 'lowMid' | 'mid' | 'upperMid' | 'presence' | 'brilliance';
   /** Frequency preset for frequency-range node */

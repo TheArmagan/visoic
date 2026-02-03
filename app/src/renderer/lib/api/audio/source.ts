@@ -26,15 +26,19 @@ export type AudioSourceState = 'inactive' | 'active' | 'suspended' | 'error';
 export class AudioSource extends AudioEventEmitter {
   public readonly id: string;
   public readonly deviceId: string;
+  public readonly sourceType: 'microphone' | 'desktop' | 'application';
+  public readonly desktopSourceId?: string;
 
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
+  private gainNode: GainNode | null = null; // For listen/mute functionality
   private analyzers: Map<string, FFTAnalyzer> = new Map();
   private config: AudioSourceConfig;
   private state: AudioSourceState = 'inactive';
   private animationFrameId: number | null = null;
   private isRunning = false;
+  private listening: boolean = false;
 
   // Peak detection settings
   private peakThreshold = 0.9;
@@ -48,6 +52,8 @@ export class AudioSource extends AudioEventEmitter {
     super();
     this.id = generateSourceId();
     this.deviceId = config.deviceId;
+    this.sourceType = config.sourceType ?? 'microphone';
+    this.desktopSourceId = config.desktopSourceId;
     this.config = {
       sampleRate: 48000,
       echoCancellation: false,
@@ -94,28 +100,74 @@ export class AudioSource extends AudioEventEmitter {
       return;
     }
 
+    console.log(`[AudioSource] Starting source:`, {
+      id: this.id,
+      sourceType: this.sourceType,
+      desktopSourceId: this.desktopSourceId,
+      deviceId: this.deviceId,
+    });
+
     try {
       // Create audio context
       this.audioContext = new AudioContext({
         sampleRate: this.config.sampleRate,
       });
 
-      // Request media stream
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          deviceId: this.deviceId === 'default' ? undefined : { exact: this.deviceId },
-          echoCancellation: this.config.echoCancellation,
-          noiseSuppression: this.config.noiseSuppression,
-          autoGainControl: this.config.autoGainControl,
-          channelCount: this.config.channelCount,
-          sampleRate: this.config.sampleRate,
-        },
-      };
+      // Request media stream based on source type
+      if (this.sourceType === 'desktop' || this.sourceType === 'application') {
+        // Desktop/Application audio capture using Electron's chromeMediaSource
+        if (!this.desktopSourceId) {
+          throw new Error('Desktop source ID is required for desktop/application audio capture. Please select a source first.');
+        }
 
-      this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        // Use Electron-specific constraints (like MediaNode)
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            // @ts-ignore - Electron specific constraint
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: this.desktopSourceId,
+            },
+          },
+          video: {
+            // @ts-ignore - Electron specific constraint - video is required but we'll stop it
+            mandatory: {
+              chromeMediaSource: 'desktop',
+              chromeMediaSourceId: this.desktopSourceId,
+            },
+          },
+        });
 
-      // Create source node from media stream
-      this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+        // Stop video tracks - we only need audio
+        const videoTracks = this.mediaStream.getVideoTracks();
+        videoTracks.forEach(track => track.stop());
+
+        // Check if we got an audio track
+        const audioTracks = this.mediaStream.getAudioTracks();
+        if (audioTracks.length === 0) {
+          throw new Error('No audio track available from the selected source.');
+        }
+
+        // Create source node from media stream
+        this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+      } else {
+        // Microphone audio capture using getUserMedia
+        const constraints: MediaStreamConstraints = {
+          audio: {
+            deviceId: this.deviceId === 'default' ? undefined : { exact: this.deviceId },
+            echoCancellation: this.config.echoCancellation,
+            noiseSuppression: this.config.noiseSuppression,
+            autoGainControl: this.config.autoGainControl,
+            channelCount: this.config.channelCount,
+            sampleRate: this.config.sampleRate,
+          },
+        };
+
+        this.mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+        // Create source node from media stream
+        this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
+      }
 
       // Reconnect existing analyzers
       for (const analyzer of this.analyzers.values()) {
@@ -130,6 +182,23 @@ export class AudioSource extends AudioEventEmitter {
       this.setState('error');
       throw error;
     }
+  }
+
+  /**
+   * Set listen mode (output to speakers)
+   */
+  setListening(listen: boolean): void {
+    this.listening = listen;
+    if (this.gainNode) {
+      this.gainNode.gain.value = listen ? 1.0 : 0.0;
+    }
+  }
+
+  /**
+   * Get current listening state
+   */
+  isListening(): boolean {
+    return this.listening;
   }
 
   /**
@@ -179,7 +248,7 @@ export class AudioSource extends AudioEventEmitter {
   /**
    * Resume audio processing
    */
-  async resume(): Promise<void> {
+  async resumeContext(): Promise<void> {
     if (this.audioContext && this.state === 'suspended') {
       await this.audioContext.resume();
       this.setState('active');
@@ -191,7 +260,12 @@ export class AudioSource extends AudioEventEmitter {
    * Create a new FFT analyzer attached to this source
    */
   createAnalyzer(config: Partial<AnalyzerConfig> = {}): FFTAnalyzer {
-    if (!this.audioContext || !this.sourceNode) {
+    if (!this.audioContext) {
+      throw new Error('Audio source is not active. Call start() first.');
+    }
+
+    // We need the sourceNode for microphone/desktop/application sources
+    if (!this.sourceNode) {
       throw new Error('Audio source is not active. Call start() first.');
     }
 

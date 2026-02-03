@@ -700,12 +700,18 @@ class NodeGraphManager {
         outputs.value = data.value;
         break;
       case 'color':
-        const color = data.value as number[];
+        const baseColor = data.value as number[];
+        // Use input values if connected, otherwise use node's color value
+        const r = inputs.r !== undefined ? Number(inputs.r) : (baseColor[0] ?? 1);
+        const g = inputs.g !== undefined ? Number(inputs.g) : (baseColor[1] ?? 1);
+        const b = inputs.b !== undefined ? Number(inputs.b) : (baseColor[2] ?? 1);
+        const a = inputs.a !== undefined ? Number(inputs.a) : (baseColor[3] ?? 1);
+        const color = [r, g, b, a];
         outputs.color = color;
-        outputs.r = color[0] ?? 1;
-        outputs.g = color[1] ?? 1;
-        outputs.b = color[2] ?? 1;
-        outputs.a = color[3] ?? 1;
+        outputs.r = r;
+        outputs.g = g;
+        outputs.b = b;
+        outputs.a = a;
         break;
       case 'vec2':
         const vec2 = data.value as number[];

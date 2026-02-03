@@ -117,7 +117,12 @@ nodeRegistry.register({
   category: 'value',
   icon: '🎨',
   tags: ['color', 'constant', 'value', 'rgba'],
-  inputs: [],
+  inputs: [
+    { type: 'input', id: 'r', label: 'R', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+    { type: 'input', id: 'g', label: 'G', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+    { type: 'input', id: 'b', label: 'B', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+    { type: 'input', id: 'a', label: 'A', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+  ],
   outputs: [
     { type: 'output', id: 'color', label: 'Color', dataType: 'color' },
     { type: 'output', id: 'r', label: 'R', dataType: 'number' },
@@ -130,7 +135,12 @@ nodeRegistry.register({
     category: 'value',
     valueType: 'color',
     value: [1, 1, 1, 1],
-    inputs: [],
+    inputs: [
+      { type: 'input', id: 'r', label: 'R', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+      { type: 'input', id: 'g', label: 'G', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+      { type: 'input', id: 'b', label: 'B', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+      { type: 'input', id: 'a', label: 'A', dataType: 'number', defaultValue: undefined, min: 0, max: 1, step: 0.01 },
+    ],
     outputs: [
       { type: 'output', id: 'color', label: 'Color', dataType: 'color' },
       { type: 'output', id: 'r', label: 'R', dataType: 'number' },
@@ -612,17 +622,17 @@ nodeRegistry.register({
 
 nodeRegistry.register({
   type: 'audio:device',
-  label: 'Audio Device',
-  description: 'Audio input device source',
+  label: 'Audio Input',
+  description: 'Audio input source (microphone, desktop, or application)',
   category: 'audio',
   icon: '🎤',
-  tags: ['audio', 'input', 'device', 'microphone', 'source'],
+  tags: ['audio', 'input', 'device', 'microphone', 'source', 'desktop'],
   inputs: [],
   outputs: [
     { type: 'output', id: 'audio', label: 'Audio', dataType: 'audio' },
   ],
   createDefaultData: (): AudioNodeData => ({
-    label: 'Audio Device',
+    label: 'Audio Input',
     category: 'audio',
     audioType: 'device',
     deviceId: 'default',

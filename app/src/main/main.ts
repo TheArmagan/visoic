@@ -219,14 +219,27 @@ function createWindow() {
     }
   });
 
-  // Show open dialog for media files (images or videos)
-  ipcMain.handle('media:showOpenDialog', async (_event, options: { type: 'image' | 'video' }) => {
-    const filters = options.type === 'video'
-      ? [{ name: 'Video Files', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogv'] }]
-      : [{ name: 'Image Files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }];
+  // Show open dialog for media files (images, videos, or audio)
+  ipcMain.handle('media:showOpenDialog', async (_event, options: { type: 'image' | 'video' | 'audio' }) => {
+    let filters;
+    let title;
+
+    switch (options.type) {
+      case 'video':
+        filters = [{ name: 'Video Files', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogv'] }];
+        title = 'Select Video File';
+        break;
+      case 'audio':
+        filters = [{ name: 'Audio Files', extensions: ['mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'wma', 'opus', 'webm'] }];
+        title = 'Select Audio File';
+        break;
+      default:
+        filters = [{ name: 'Image Files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }];
+        title = 'Select Image File';
+    }
 
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: options.type === 'video' ? 'Select Video File' : 'Select Image File',
+      title,
       filters,
       properties: ['openFile']
     });
@@ -258,14 +271,25 @@ function createWindow() {
         'avi': 'video/x-msvideo',
         'mkv': 'video/x-matroska',
         'ogv': 'video/ogg',
+        // Audio
+        'mp3': 'audio/mpeg',
+        'wav': 'audio/wav',
+        'ogg': 'audio/ogg',
+        'flac': 'audio/flac',
+        'aac': 'audio/aac',
+        'm4a': 'audio/mp4',
+        'wma': 'audio/x-ms-wma',
+        'opus': 'audio/opus',
       };
 
       const mimeType = mimeTypes[ext] || 'application/octet-stream';
 
+      // Send as base64 to avoid IPC ArrayBuffer serialization issues
       return {
         success: true,
-        data: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
-        mimeType
+        data: buffer.toString('base64'),
+        mimeType,
+        isBase64: true
       };
     } catch (error) {
       console.error('Failed to read media file:', error);
@@ -276,7 +300,7 @@ function createWindow() {
   // Get desktop capture sources (screens and windows)
   ipcMain.handle('media:getDesktopSources', async () => {
     try {
-      
+
       const sources = await desktopCapturer.getSources({
         types: ['screen', 'window'],
         thumbnailSize: { width: 160, height: 90 }

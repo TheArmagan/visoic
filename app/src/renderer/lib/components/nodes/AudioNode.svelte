@@ -8,6 +8,7 @@
   import { Input } from "$lib/components/ui/input";
   import { Label } from "$lib/components/ui/label";
   import { RangeSlider } from "$lib/components/ui/range-slider";
+  import { Switch } from "$lib/components/ui/switch";
 
   interface Props {
     id: string;
@@ -65,10 +66,43 @@
     updateNodeData(props.id, updates);
   }
 
+  // Native API type for desktop source access
+  type NativeAPI = {
+    media?: {
+      getDesktopSources: () => Promise<{
+        success: boolean;
+        sources?: Array<{ id: string; name: string; thumbnail?: string }>;
+        error?: string;
+      }>;
+    };
+  };
+
+  const nativeAPI = (window as unknown as { VISOICNative?: NativeAPI })
+    .VISOICNative;
+
   // Fetch device list from audio API
   let devices = $state<{ value: string; label: string }[]>([
     { value: "default", label: "Default Device" },
   ]);
+
+  // Desktop sources list (like MediaNode)
+  let allDesktopSources = $state<
+    Array<{ id: string; name: string; thumbnail?: string }>
+  >([]);
+
+  // Filter sources based on source type
+  // Screen sources have IDs starting with "screen:", window sources start with "window:"
+  const filteredDesktopSources = $derived(() => {
+    const sourceType = data.sourceType;
+    if (sourceType === "desktop") {
+      // Show only screen sources for desktop audio
+      return allDesktopSources.filter((s) => s.id.startsWith("screen:"));
+    } else if (sourceType === "application") {
+      // Show only window sources for application audio
+      return allDesktopSources.filter((s) => s.id.startsWith("window:"));
+    }
+    return allDesktopSources;
+  });
 
   onMount(() => {
     nodeRuntime.getAudioDevices().then((deviceList) => {
@@ -80,7 +114,43 @@
         devices = [{ value: "default", label: "Default Device" }];
       }
     });
+
+    // Load desktop sources if needed
+    if (
+      props.data.sourceType === "desktop" ||
+      props.data.sourceType === "application"
+    ) {
+      loadDesktopSources();
+    }
   });
+
+  async function loadDesktopSources() {
+    try {
+      const result = await nativeAPI?.media?.getDesktopSources();
+      if (result?.success && result.sources) {
+        allDesktopSources = result.sources;
+      }
+    } catch (e) {
+      console.error("Failed to get desktop sources:", e);
+    }
+  }
+
+  async function selectDesktopSource(sourceId: string) {
+    const source = allDesktopSources.find((s) => s.id === sourceId);
+    updateData({
+      desktopSourceId: sourceId,
+      desktopSourceName: source?.name,
+    });
+    // Recreate runtime with new source - use tick to ensure state is updated
+    await Promise.resolve(); // microtask tick
+    nodeRuntime.recreateAudioRuntime(props.id);
+  }
+
+  const sourceTypes = [
+    { value: "microphone", label: "🎤 Microphone" },
+    { value: "desktop", label: "🖥️ Desktop" },
+    { value: "application", label: "📱 Application" },
+  ];
 
   const fftSizes = [
     { value: "256", label: "256" },
@@ -205,27 +275,104 @@
 <BaseNode {...props}>
   {#if data.audioType === "device"}
     <div class="space-y-2">
-      <Label class="text-[10px] text-neutral-400">Device</Label>
-      <Select.Root
-        type="single"
-        value={data.deviceId ?? "default"}
-        onValueChange={(v) => {
-          updateData({ deviceId: v });
-          nodeRuntime.setNodeDevice(props.id, v);
-        }}
-      >
-        <Select.Trigger
-          class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+      <!-- Source Type Selection -->
+      <div>
+        <Label class="text-[10px] text-neutral-400">Source Type</Label>
+        <Select.Root
+          type="single"
+          value={data.sourceType ?? "microphone"}
+          onValueChange={(v) => {
+            updateData({
+              sourceType: v as "microphone" | "desktop" | "application",
+              // Clear desktop source when switching types
+              desktopSourceId: undefined,
+              desktopSourceName: undefined,
+            });
+            // Load desktop sources if switching to desktop/application
+            if (v === "desktop" || v === "application") {
+              loadDesktopSources();
+            }
+          }}
         >
-          {devices.find((d) => d.value === data.deviceId)?.label ??
-            "Select Device"}
-        </Select.Trigger>
-        <Select.Content>
-          {#each devices as device}
-            <Select.Item value={device.value}>{device.label}</Select.Item>
-          {/each}
-        </Select.Content>
-      </Select.Root>
+          <Select.Trigger
+            class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          >
+            {sourceTypes.find(
+              (s) => s.value === (data.sourceType ?? "microphone"),
+            )?.label ?? "🎤 Microphone"}
+          </Select.Trigger>
+          <Select.Content>
+            {#each sourceTypes as sourceType}
+              <Select.Item value={sourceType.value}
+                >{sourceType.label}</Select.Item
+              >
+            {/each}
+          </Select.Content>
+        </Select.Root>
+      </div>
+
+      <!-- Device Selection (only for microphone) -->
+      {#if (data.sourceType ?? "microphone") === "microphone"}
+        <div>
+          <Label class="text-[10px] text-neutral-400">Device</Label>
+          <Select.Root
+            type="single"
+            value={data.deviceId ?? "default"}
+            onValueChange={(v) => {
+              updateData({ deviceId: v });
+              nodeRuntime.setNodeDevice(props.id, v);
+            }}
+          >
+            <Select.Trigger
+              class="h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            >
+              {devices.find((d) => d.value === data.deviceId)?.label ??
+                "Select Device"}
+            </Select.Trigger>
+            <Select.Content>
+              {#each devices as device}
+                <Select.Item value={device.value}>{device.label}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+        </div>
+      {:else}
+        <!-- Desktop/Application Source Selection (like MediaNode) -->
+        <div class="space-y-1">
+          <div class="flex gap-1">
+            <Select.Root
+              type="single"
+              value={data.desktopSourceId}
+              onValueChange={(v) => selectDesktopSource(v)}
+            >
+              <Select.Trigger
+                class="flex-1 h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+              >
+                {data.desktopSourceName ?? "Select Source..."}
+              </Select.Trigger>
+              <Select.Content>
+                {#each filteredDesktopSources() as source}
+                  <Select.Item value={source.id}>{source.name}</Select.Item>
+                {/each}
+              </Select.Content>
+            </Select.Root>
+            <button
+              onclick={loadDesktopSources}
+              class="h-7 px-2 text-xs bg-neutral-800 border border-neutral-700 rounded nodrag hover:bg-neutral-700"
+            >
+              ↻
+            </button>
+          </div>
+          <div class="text-[10px] text-neutral-500">
+            {#if data.sourceType === "desktop"}
+              🖥️ Select a screen to capture its audio
+            {:else}
+              📱 Select a window to capture its audio
+            {/if}
+          </div>
+        </div>
+      {/if}
+
       <!-- Volume meter -->
       <div class="h-2 bg-neutral-800 rounded overflow-hidden">
         <div

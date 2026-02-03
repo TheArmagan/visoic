@@ -128,6 +128,14 @@ class NodeRuntimeManager {
   private async createAudioDeviceRuntime(node: VisoicNode): Promise<void> {
     const data = node.data as AudioNodeData;
     const deviceId = data.deviceId || 'default';
+    const sourceType = data.sourceType || 'microphone';
+    const desktopSourceId = data.desktopSourceId;
+
+    // For desktop/application sources, require desktopSourceId
+    if ((sourceType === 'desktop' || sourceType === 'application') && !desktopSourceId) {
+      console.log(`[NodeRuntime] Skipping audio runtime creation for node ${node.id} - no desktop source selected`);
+      return;
+    }
 
     // Prevent duplicate creation
     if (this.audioRuntimes.has(node.id)) return;
@@ -146,9 +154,11 @@ class NodeRuntimeManager {
       : 2048;
 
     try {
-      // Create analyzer for this device
+      // Create analyzer for this device/source
       const handle = await audioManager.createAnalyzer({
         deviceId,
+        sourceType,
+        desktopSourceId,
         fftSize,
         smoothingTimeConstant: data.analyzerConfig?.smoothing ?? 0.8,
         gain: data.analyzerConfig?.gain ?? 1.0,
@@ -177,7 +187,7 @@ class NodeRuntimeManager {
         },
       });
 
-      console.log(`[NodeRuntime] Created audio runtime for node ${node.id} on device ${deviceId}`);
+      console.log(`[NodeRuntime] Created audio runtime for node ${node.id} with sourceType=${sourceType}`);
     } catch (error) {
       console.error(`[NodeRuntime] Failed to create audio runtime for node ${node.id}:`, error);
       this.audioRuntimes.delete(node.id); // Clear pending entry
@@ -574,6 +584,54 @@ class NodeRuntimeManager {
     // Recreate runtime with new device
     this.destroyAudioRuntime(nodeId);
     this.createAudioDeviceRuntime(node);
+  }
+
+  /**
+   * Recreate audio runtime for a node (e.g., when source type changes)
+   */
+  recreateAudioRuntime(nodeId: string): void {
+    const node = nodeGraph.getNode(nodeId);
+    if (!node || node.data.category !== 'audio') return;
+
+    const data = node.data as AudioNodeData;
+    console.log(`[NodeRuntime] Recreating audio runtime for ${nodeId}:`, {
+      sourceType: data.sourceType,
+      desktopSourceId: data.desktopSourceId,
+      desktopSourceName: data.desktopSourceName,
+    });
+
+    // Destroy and recreate runtime
+    this.destroyAudioRuntime(nodeId);
+    this.createAudioDeviceRuntime(node);
+  }
+
+  // ============================================
+  // Audio Controls
+  // ============================================
+
+  /**
+   * Get the analyzer handle for an audio node (if it exists)
+   */
+  getAudioHandle(nodeId: string): AnalyzerHandle | undefined {
+    return this.audioRuntimes.get(nodeId)?.analyzerHandle;
+  }
+
+  /**
+   * Toggle listen mode (output to speakers) for an audio node
+   */
+  setAudioListening(nodeId: string, listen: boolean): void {
+    const handle = this.audioRuntimes.get(nodeId)?.analyzerHandle;
+    if (handle?.setListening) {
+      handle.setListening(listen);
+    }
+  }
+
+  /**
+   * Check if audio node is in listen mode
+   */
+  isAudioListening(nodeId: string): boolean {
+    const handle = this.audioRuntimes.get(nodeId)?.analyzerHandle;
+    return handle?.isListening?.() ?? false;
   }
 }
 

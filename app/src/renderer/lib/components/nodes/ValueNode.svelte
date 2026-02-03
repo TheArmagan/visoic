@@ -133,48 +133,92 @@
       />
     </div>
   {:else if data.valueType === "color"}
+    {@const baseColor = reactiveValue as number[]}
+    {@const inputValues = data.inputValues ?? {}}
+    {@const hasRInput = inputValues.r !== undefined}
+    {@const hasGInput = inputValues.g !== undefined}
+    {@const hasBInput = inputValues.b !== undefined}
+    {@const hasAInput = inputValues.a !== undefined}
+    {@const computedR = hasRInput ? Number(inputValues.r) : (baseColor[0] ?? 1)}
+    {@const computedG = hasGInput ? Number(inputValues.g) : (baseColor[1] ?? 1)}
+    {@const computedB = hasBInput ? Number(inputValues.b) : (baseColor[2] ?? 1)}
+    {@const computedA = hasAInput ? Number(inputValues.a) : (baseColor[3] ?? 1)}
+    {@const anyInputConnected =
+      hasRInput || hasGInput || hasBInput || hasAInput}
     <div class="space-y-2">
-      <input
-        type="color"
-        value={`#${(reactiveValue as number[])
-          .slice(0, 3)
-          .map((v) =>
-            Math.round(v * 255)
-              .toString(16)
-              .padStart(2, "0"),
-          )
-          .join("")}`}
-        oninput={(e) => {
-          const hex = (e.target as HTMLInputElement).value;
-          const r = parseInt(hex.slice(1, 3), 16) / 255;
-          const g = parseInt(hex.slice(3, 5), 16) / 255;
-          const b = parseInt(hex.slice(5, 7), 16) / 255;
-          const a = (reactiveValue as number[])[3] ?? 1;
-          updateValue([r, g, b, a]);
-        }}
-        class="w-full h-8 rounded cursor-pointer nodrag"
-      />
-      <div class="flex items-center gap-2">
-        <span class="text-[10px] text-neutral-500">Alpha</span>
-        <RangeSlider
-          value={(reactiveValue as number[])[3] ?? 1}
-          min={0}
-          max={1}
-          step={0.01}
+      <!-- Color preview showing computed color -->
+      <div
+        class="w-full h-8 rounded border border-neutral-700"
+        style="background-color: rgba({Math.round(
+          computedR * 255,
+        )}, {Math.round(computedG * 255)}, {Math.round(
+          computedB * 255,
+        )}, {computedA});"
+      ></div>
+
+      <!-- Color picker (only affects base color, disabled channels show connected value) -->
+      {#if !anyInputConnected}
+        <input
+          type="color"
+          value={`#${baseColor
+            .slice(0, 3)
+            .map((v) =>
+              Math.round(v * 255)
+                .toString(16)
+                .padStart(2, "0"),
+            )
+            .join("")}`}
           oninput={(e) => {
-            const v = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && Array.isArray(node.data.value)) {
-              node.data.value[3] = v;
-            }
+            const hex = (e.target as HTMLInputElement).value;
+            const r = parseInt(hex.slice(1, 3), 16) / 255;
+            const g = parseInt(hex.slice(3, 5), 16) / 255;
+            const b = parseInt(hex.slice(5, 7), 16) / 255;
+            const a = baseColor[3] ?? 1;
+            updateValue([r, g, b, a]);
           }}
-          onchange={(e) => {
-            const v = parseFloat((e.target as HTMLInputElement).value);
-            const color = reactiveValue as number[];
-            updateValue([color[0], color[1], color[2], v]);
-          }}
-          class="flex-1"
+          class="w-full h-6 rounded cursor-pointer nodrag"
         />
+      {/if}
+
+      <!-- RGBA channel controls -->
+      <div class="grid grid-cols-4 gap-1">
+        {#each [{ label: "R", index: 0, connected: hasRInput, value: computedR }, { label: "G", index: 1, connected: hasGInput, value: computedG }, { label: "B", index: 2, connected: hasBInput, value: computedB }, { label: "A", index: 3, connected: hasAInput, value: computedA }] as channel}
+          <div class="flex flex-col items-center gap-0.5">
+            <span class="text-[9px] text-neutral-500">{channel.label}</span>
+            {#if channel.connected}
+              <div
+                class="h-5 w-full flex items-center justify-center text-[10px] text-neutral-400 bg-neutral-800 rounded border border-neutral-600"
+              >
+                {channel.value.toFixed(2)}
+              </div>
+            {:else}
+              <input
+                type="number"
+                value={baseColor[channel.index] ??
+                  (channel.index === 3 ? 1 : 0)}
+                min={0}
+                max={1}
+                step={0.01}
+                oninput={(e) => {
+                  const v =
+                    parseFloat((e.target as HTMLInputElement).value) || 0;
+                  const node = nodeGraph.getNode(props.id);
+                  if (node && Array.isArray(node.data.value)) {
+                    node.data.value[channel.index] = v;
+                  }
+                }}
+                onchange={(e) => {
+                  const v =
+                    parseFloat((e.target as HTMLInputElement).value) || 0;
+                  const newColor = [...baseColor];
+                  newColor[channel.index] = v;
+                  updateValue(newColor);
+                }}
+                class="h-5 w-full text-[10px] text-center bg-neutral-800 border border-neutral-700 rounded nodrag px-1"
+              />
+            {/if}
+          </div>
+        {/each}
       </div>
     </div>
   {:else if data.valueType === "vec2"}

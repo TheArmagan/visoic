@@ -133,6 +133,12 @@ export interface AudioSourceConfig {
   /** Device ID to use. Use 'default' for system default */
   deviceId: string;
 
+  /** Source type: 'microphone' for input devices, 'desktop' for full system audio, 'application' for specific app/window audio */
+  sourceType?: 'microphone' | 'desktop' | 'application';
+
+  /** Desktop source ID from Electron's desktopCapturer (for desktop/application capture) */
+  desktopSourceId?: string;
+
   /** Sample rate for the audio context */
   sampleRate?: number;
 

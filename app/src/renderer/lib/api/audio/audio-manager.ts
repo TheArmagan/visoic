@@ -19,8 +19,12 @@ import { FFTAnalyzer } from './analyzer';
 export interface CreateAnalyzerOptions extends Partial<AnalyzerConfig> {
   /** Device ID to use. Use 'default' for system default device */
   deviceId?: string;
+  /** Source type: 'microphone' for input devices, 'desktop' for full system audio, 'application' for specific app/window audio */
+  sourceType?: 'microphone' | 'desktop' | 'application';
+  /** Desktop source ID from Electron's desktopCapturer (for desktop/application capture) */
+  desktopSourceId?: string;
   /** Source configuration options */
-  sourceConfig?: Partial<Omit<AudioSourceConfig, 'deviceId'>>;
+  sourceConfig?: Partial<Omit<AudioSourceConfig, 'deviceId' | 'sourceType' | 'desktopSourceId'>>;
 }
 
 export interface AnalyzerHandle {
@@ -42,6 +46,10 @@ export interface AnalyzerHandle {
   updateConfig: (config: Partial<AnalyzerConfig>) => void;
   /** Destroy this analyzer */
   destroy: () => void;
+  /** Set listen mode (output to speakers) */
+  setListening?: (listen: boolean) => void;
+  /** Get listening state */
+  isListening?: () => boolean;
 }
 
 /**
@@ -164,18 +172,35 @@ export class AudioManager extends AudioEventEmitter {
    */
   private async getOrCreateSource(
     deviceId: string,
-    config?: Partial<Omit<AudioSourceConfig, 'deviceId'>>
+    sourceType: 'microphone' | 'desktop' | 'application' = 'microphone',
+    desktopSourceId?: string,
+    config?: Partial<Omit<AudioSourceConfig, 'deviceId' | 'sourceType' | 'desktopSourceId'>>
   ): Promise<AudioSource> {
-    // Check if we already have an active source for this device
-    for (const source of this.sources.values()) {
-      if (source.deviceId === deviceId && source.isActive()) {
-        return source;
+    // For microphone sources, we can reuse existing active sources
+    if (sourceType === 'microphone') {
+      for (const source of this.sources.values()) {
+        if (source.deviceId === deviceId && source.sourceType === sourceType && source.isActive()) {
+          return source;
+        }
+      }
+    }
+
+    // For desktop/application sources, check if we have an existing source with same desktopSourceId
+    if ((sourceType === 'desktop' || sourceType === 'application') && desktopSourceId) {
+      for (const source of this.sources.values()) {
+        if (source.sourceType === sourceType &&
+          source.desktopSourceId === desktopSourceId &&
+          source.isActive()) {
+          return source;
+        }
       }
     }
 
     // Create new source
     const source = new AudioSource({
       deviceId,
+      sourceType,
+      desktopSourceId,
       ...config,
     });
 
@@ -227,6 +252,17 @@ export class AudioManager extends AudioEventEmitter {
    *   smoothingTimeConstant: 0.85,
    *   gain: 1.5,
    * });
+   * 
+   * // Desktop audio analyzer (full system audio)
+   * const desktopAnalyzer = await audio.createAnalyzer({
+   *   sourceType: 'desktop',
+   * });
+   * 
+   * // Application-specific audio analyzer
+   * const appAnalyzer = await audio.createAnalyzer({
+   *   sourceType: 'application',
+   *   displaySurface: 'window', // Will prompt user to select a window
+   * });
    * ```
    */
   async createAnalyzer(options: CreateAnalyzerOptions = {}): Promise<AnalyzerHandle> {
@@ -236,12 +272,14 @@ export class AudioManager extends AudioEventEmitter {
 
     const {
       deviceId = 'default',
+      sourceType = 'microphone',
+      desktopSourceId,
       sourceConfig,
       ...analyzerConfig
     } = options;
 
-    // Get or create source for this device
-    const source = await this.getOrCreateSource(deviceId, sourceConfig);
+    // Get or create source for this device and source type
+    const source = await this.getOrCreateSource(deviceId, sourceType, desktopSourceId, sourceConfig);
 
     // Create analyzer on the source
     const analyzer = source.createAnalyzer(analyzerConfig);
@@ -271,6 +309,9 @@ export class AudioManager extends AudioEventEmitter {
       updateConfig: (config) => analyzer.updateConfig(config),
 
       destroy: () => this.removeAnalyzer(analyzer.id),
+
+      setListening: (listen: boolean) => source.setListening(listen),
+      isListening: () => source.isListening(),
     };
 
     return handle;

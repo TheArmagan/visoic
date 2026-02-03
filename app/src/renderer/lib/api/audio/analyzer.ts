@@ -32,7 +32,7 @@ export class FFTAnalyzer {
   private normalizationGainNode: GainNode | null = null;
   private config: AnalyzerConfig;
   private audioContext: AudioContext;
-  private sourceNode: AudioNode;
+  private sourceNode: AudioNode | null;
 
   // Pre-allocated buffers for performance
   private frequencyData: Float32Array<ArrayBuffer>;
@@ -167,7 +167,7 @@ export class FFTAnalyzer {
 
   constructor(
     audioContext: AudioContext,
-    sourceNode: AudioNode,
+    sourceNode: AudioNode | null,
     config: Partial<AnalyzerConfig> = {}
   ) {
     this.id = config.id ?? generateAnalyzerId();
@@ -186,8 +186,10 @@ export class FFTAnalyzer {
     this.analyzerNode = audioContext.createAnalyser();
     this.applyConfig();
 
-    // Build audio graph
-    this.buildAudioGraph();
+    // Build audio graph (only if source is available)
+    if (this.sourceNode) {
+      this.buildAudioGraph();
+    }
 
     // Initialize buffers
     const bufferLength = this.analyzerNode.frequencyBinCount;
@@ -201,6 +203,8 @@ export class FFTAnalyzer {
    * Build the audio processing graph based on current settings
    */
   private buildAudioGraph(): void {
+    if (!this.sourceNode) return;
+
     // Disconnect existing connections
     try {
       this.sourceNode.disconnect();
@@ -261,6 +265,20 @@ export class FFTAnalyzer {
     this.analyzerNode.smoothingTimeConstant = this.config.smoothingTimeConstant;
     this.analyzerNode.minDecibels = this.config.minDecibels;
     this.analyzerNode.maxDecibels = this.config.maxDecibels;
+  }
+
+  /**
+   * Get the input node for connecting audio sources
+   */
+  getInputNode(): AudioNode {
+    return this.gainNode;
+  }
+
+  /**
+   * Get the raw AnalyserNode for direct access if needed
+   */
+  getAnalyserNode(): AnalyserNode {
+    return this.analyzerNode;
   }
 
   /**

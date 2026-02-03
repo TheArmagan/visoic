@@ -955,8 +955,7 @@
             return {
               ...edge,
               selected: isClicked,
-              style: `stroke: ${edgeColor}; stroke-width: ${isClicked ? 3 : 2};`,
-              animated: isClicked,
+              style: `stroke: ${edgeColor}; stroke-width: ${isClicked ? 4 : 2};`,
             };
           });
         }

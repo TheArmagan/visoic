@@ -46,9 +46,9 @@ contextBridge.exposeInMainWorld('VISOICNative', {
   },
   // Media File API
   media: {
-    showOpenDialog: (options: { type: 'image' | 'video' }): Promise<{ canceled: boolean; filePaths: string[] }> =>
+    showOpenDialog: (options: { type: 'image' | 'video' | 'audio' }): Promise<{ canceled: boolean; filePaths: string[] }> =>
       ipcRenderer.invoke('media:showOpenDialog', options),
-    readFile: (filePath: string): Promise<{ success: boolean; data?: ArrayBuffer; mimeType?: string; error?: string }> =>
+    readFile: (filePath: string): Promise<{ success: boolean; data?: ArrayBuffer | string; mimeType?: string; isBase64?: boolean; error?: string }> =>
       ipcRenderer.invoke('media:readFile', filePath),
     getDesktopSources: (): Promise<{ success: boolean; sources?: Array<{ id: string; name: string; thumbnail?: string }>; error?: string }> =>
       ipcRenderer.invoke('media:getDesktopSources'),

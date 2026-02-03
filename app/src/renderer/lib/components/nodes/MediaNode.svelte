@@ -22,7 +22,7 @@
   type NativeAPI = {
     media?: {
       showOpenDialog: (options: {
-        type: "image" | "video";
+        type: "image" | "video" | "audio";
       }) => Promise<{ canceled: boolean; filePaths: string[] }>;
       readFile: (filePath: string) => Promise<{
         success: boolean;
