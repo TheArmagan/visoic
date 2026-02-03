@@ -225,7 +225,7 @@ function createWindow() {
 
   const isfBasePath = isDev
     ? path.join(__dirname, '..', 'ISF')
-    : path.join(process.resourcesPath, 'ISF');
+    : path.join(process.resourcesPath, 'app.asar.unpacked', 'ISF');
 
   // Get all ISF categories (folders)
   ipcMain.handle('isf:getCategories', async () => {

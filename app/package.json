@@ -15,7 +15,8 @@
     "postinstall": "electron-builder install-app-deps",
     "shader-test": "node shader-test-cli.js",
     "shader-test:watch": "node shader-test-cli.js watch",
-    "shader-test:start": "node shader-test-cli.js start"
+    "shader-test:start": "node shader-test-cli.js start",
+    "package": "bun run build && electron-forge package"
   },
   "keywords": [
     "electron",
@@ -25,6 +26,7 @@
   ],
   "author": "Kıraç Armağan Önal",
   "devDependencies": {
+    "@electron-forge/cli": "^7.11.1",
     "@internationalized/date": "^3.10.0",
     "@sveltejs/vite-plugin-svelte": "^5.1.1",
     "@tailwindcss/postcss": "^4.1.17",
@@ -64,5 +66,38 @@
     "tailwind-merge": "^3.4.0",
     "tailwind-variants": "^3.2.2",
     "tw-animate-css": "^1.4.0"
+  },
+  "config": {
+    "forge": {
+      "packagerConfig": {
+        "icon": "build/icon",
+        "name": "VISOIC",
+        "executableName": "VISOIC",
+        "asar": {
+          "unpack": "**/ISF/**"
+        },
+        "win32metadata": {
+          "CompanyName": "Kıraç Armağan Önal",
+          "FileDescription": "Visoic - Visualize the unseen world of sound with WebGPU-powered audio visualizations.",
+          "ProductName": "VISOIC"
+        }
+      },
+      "rebuildConfig": {},
+      "makers": [
+        {
+          "name": "@electron-forge/maker-squirrel",
+          "config": {
+            "name": "visoic",
+            "authors": "Kıraç Armağan Önal",
+            "description": "Visoic - Visualize the unseen world of sound with WebGPU-powered audio visualizations.",
+            "setupIcon": "build/icon.ico",
+            "loadingGif": "build/icon.png",
+            "noMsi": true
+          }
+        }
+      ],
+      "publishers": [],
+      "plugins": []
+    }
   }
 }
