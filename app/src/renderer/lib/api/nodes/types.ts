@@ -482,12 +482,33 @@ export interface OutputNodeData extends BaseNodeData {
   };
 }
 
+export interface MediaNodeData extends BaseNodeData {
+  category: 'value';
+  /** Media type */
+  mediaType: 'image' | 'video';
+  /** File path to the media */
+  filePath?: string;
+  /** Video loop setting */
+  loop?: boolean;
+  /** Video playback speed (1.0 = normal) */
+  playbackSpeed?: number;
+  /** Auto-play video on load */
+  autoplay?: boolean;
+  /** Media width (set after loading) */
+  width?: number;
+  /** Media height (set after loading) */
+  height?: number;
+  /** Internal reference to the media element (not serialized) */
+  _mediaElement?: HTMLImageElement | HTMLVideoElement;
+}
+
 export type AnyNodeData =
   | RenderContextNodeData
   | ShaderNodeData
   | MathNodeData
   | ValueNodeData
   | AudioNodeData
+  | MediaNodeData
   | LogicNodeData
   | UtilityNodeData
   | OutputNodeData;

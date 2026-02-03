@@ -219,6 +219,60 @@ function createWindow() {
     }
   });
 
+  // Show open dialog for media files (images or videos)
+  ipcMain.handle('media:showOpenDialog', async (_event, options: { type: 'image' | 'video' }) => {
+    const filters = options.type === 'video'
+      ? [{ name: 'Video Files', extensions: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'ogv'] }]
+      : [{ name: 'Image Files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'] }];
+
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: options.type === 'video' ? 'Select Video File' : 'Select Image File',
+      filters,
+      properties: ['openFile']
+    });
+
+    return {
+      canceled: result.canceled,
+      filePaths: result.filePaths
+    };
+  });
+
+  // Read media file as buffer
+  ipcMain.handle('media:readFile', async (_event, filePath: string) => {
+    try {
+      const buffer = await fs.readFile(filePath);
+      const ext = filePath.split('.').pop()?.toLowerCase() || '';
+
+      // Determine MIME type
+      const mimeTypes: Record<string, string> = {
+        'png': 'image/png',
+        'jpg': 'image/jpeg',
+        'jpeg': 'image/jpeg',
+        'gif': 'image/gif',
+        'webp': 'image/webp',
+        'bmp': 'image/bmp',
+        'svg': 'image/svg+xml',
+        'mp4': 'video/mp4',
+        'webm': 'video/webm',
+        'mov': 'video/quicktime',
+        'avi': 'video/x-msvideo',
+        'mkv': 'video/x-matroska',
+        'ogv': 'video/ogg',
+      };
+
+      const mimeType = mimeTypes[ext] || 'application/octet-stream';
+
+      return {
+        success: true,
+        data: buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength),
+        mimeType
+      };
+    } catch (error) {
+      console.error('Failed to read media file:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
   // ==========================================
   // ISF Shader File System API
   // ==========================================

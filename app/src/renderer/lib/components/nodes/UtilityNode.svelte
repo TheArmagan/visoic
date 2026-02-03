@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { useSvelteFlow } from "@xyflow/svelte";
+  import { useSvelteFlow, useEdges } from "@xyflow/svelte";
   import type { UtilityNodeData } from "$lib/api/nodes/types";
   import { nodeGraph } from "$lib/api/nodes";
   import BaseNode from "./BaseNode.svelte";
@@ -42,6 +42,16 @@
   const outputValues = $derived(data.outputValues);
 
   const { updateNodeData } = useSvelteFlow();
+  const edges = useEdges();
+
+  // Compute connected inputs reactively
+  const connectedInputs = $derived(
+    new Set(
+      edges.current
+        .filter((e) => e.target === props.id)
+        .map((e) => e.targetHandle),
+    ),
+  );
 
   // Helper to update both nodeGraph and SvelteFlow
   function updateData(updates: Partial<UtilityNodeData>) {
@@ -140,49 +150,55 @@
     </div>
   {:else if data.utilityType === "smooth"}
     <div class="space-y-2">
-      <div>
-        <Label class="text-[10px] text-neutral-400">Value</Label>
-        <Input
-          type="number"
-          step="0.01"
-          value={data.inputValues?.value ?? 0}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value) || 0;
-            const node = nodeGraph.getNode(props.id);
-            if (node?.data?.inputValues) {
-              node.data.inputValues.value = val;
-            }
-          }}
-          onchange={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value) || 0;
-            updateData({ inputValues: { ...data.inputValues, value: val } });
-          }}
-          class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
-        />
-      </div>
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Speed: {(data.inputValues?.speed ?? 0.1).toFixed(2)}
-        </Label>
-        <RangeSlider
-          value={data.inputValues?.speed ?? 0.1}
-          min={0.001}
-          max={1}
-          step={0.001}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value) || 0.1;
-            const node = nodeGraph.getNode(props.id);
-            if (node?.data?.inputValues) {
-              node.data.inputValues.speed = val;
-            }
-          }}
-          onchange={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value) || 0.1;
-            updateData({ inputValues: { ...data.inputValues, speed: val } });
-          }}
-          class="w-full nodrag"
-        />
-      </div>
+      {#if !connectedInputs.has("value")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">Value</Label>
+          <Input
+            type="number"
+            step="0.01"
+            value={data.inputValues?.value ?? 0}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+              const node = nodeGraph.getNode(props.id);
+              if (node?.data?.inputValues) {
+                node.data.inputValues.value = val;
+              }
+            }}
+            onchange={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+              updateData({ inputValues: { ...data.inputValues, value: val } });
+            }}
+            class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          />
+        </div>
+      {/if}
+      {#if !connectedInputs.has("speed")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Speed: {(data.inputValues?.speed ?? 0.1).toFixed(2)}
+          </Label>
+          <RangeSlider
+            value={data.inputValues?.speed ?? 0.1}
+            min={0.001}
+            max={1}
+            step={0.001}
+            oninput={(e) => {
+              const val =
+                parseFloat((e.target as HTMLInputElement).value) || 0.1;
+              const node = nodeGraph.getNode(props.id);
+              if (node?.data?.inputValues) {
+                node.data.inputValues.speed = val;
+              }
+            }}
+            onchange={(e) => {
+              const val =
+                parseFloat((e.target as HTMLInputElement).value) || 0.1;
+              updateData({ inputValues: { ...data.inputValues, speed: val } });
+            }}
+            class="w-full nodrag"
+          />
+        </div>
+      {/if}
       <div class="w-full h-6 bg-neutral-800 rounded overflow-hidden relative">
         <div
           class="absolute inset-y-0 left-0 bg-linear-to-r from-blue-500 to-purple-500 transition-all duration-100"
@@ -195,71 +211,81 @@
     </div>
   {:else if data.utilityType === "accumulator"}
     <div class="space-y-2">
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Rate: {(data.accumulatorConfig?.rate ?? 1).toFixed(2)}/s
-        </Label>
-        <RangeSlider
-          value={data.accumulatorConfig?.rate ?? 1}
-          min={-10}
-          max={10}
-          step={0.1}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && node.data.accumulatorConfig) {
-              node.data.accumulatorConfig.rate = val;
-            }
-          }}
-          onchange={(e) =>
-            updateAccumulatorConfig(
-              "rate",
-              parseFloat((e.target as HTMLInputElement).value),
-            )}
-        />
-      </div>
-      <div class="grid grid-cols-2 gap-2">
+      {#if !connectedInputs.has("rate")}
         <div>
-          <Label class="text-[10px] text-neutral-400">Min</Label>
-          <Input
-            type="number"
-            value={data.accumulatorConfig?.min ?? 0}
+          <Label class="text-[10px] text-neutral-400">
+            Rate: {(data.accumulatorConfig?.rate ?? 1).toFixed(2)}/s
+          </Label>
+          <RangeSlider
+            value={data.accumulatorConfig?.rate ?? 1}
+            min={-10}
+            max={10}
+            step={0.1}
             oninput={(e) => {
-              const val = parseFloat((e.target as HTMLInputElement).value) || 0;
+              const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node?.data?.accumulatorConfig) {
-                node.data.accumulatorConfig.min = val;
+              if (node && node.data.accumulatorConfig) {
+                node.data.accumulatorConfig.rate = val;
               }
             }}
             onchange={(e) =>
               updateAccumulatorConfig(
-                "min",
-                parseFloat((e.target as HTMLInputElement).value) || 0,
+                "rate",
+                parseFloat((e.target as HTMLInputElement).value),
               )}
-            class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
           />
         </div>
-        <div>
-          <Label class="text-[10px] text-neutral-400">Max</Label>
-          <Input
-            type="number"
-            value={data.accumulatorConfig?.max ?? 1}
-            oninput={(e) => {
-              const val = parseFloat((e.target as HTMLInputElement).value) || 1;
-              const node = nodeGraph.getNode(props.id);
-              if (node?.data?.accumulatorConfig) {
-                node.data.accumulatorConfig.max = val;
-              }
-            }}
-            onchange={(e) =>
-              updateAccumulatorConfig(
-                "max",
-                parseFloat((e.target as HTMLInputElement).value) || 1,
-              )}
-            class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
-          />
+      {/if}
+      {#if !connectedInputs.has("min") || !connectedInputs.has("max")}
+        <div class="grid grid-cols-2 gap-2">
+          {#if !connectedInputs.has("min")}
+            <div>
+              <Label class="text-[10px] text-neutral-400">Min</Label>
+              <Input
+                type="number"
+                value={data.accumulatorConfig?.min ?? 0}
+                oninput={(e) => {
+                  const val =
+                    parseFloat((e.target as HTMLInputElement).value) || 0;
+                  const node = nodeGraph.getNode(props.id);
+                  if (node?.data?.accumulatorConfig) {
+                    node.data.accumulatorConfig.min = val;
+                  }
+                }}
+                onchange={(e) =>
+                  updateAccumulatorConfig(
+                    "min",
+                    parseFloat((e.target as HTMLInputElement).value) || 0,
+                  )}
+                class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+              />
+            </div>
+          {/if}
+          {#if !connectedInputs.has("max")}
+            <div>
+              <Label class="text-[10px] text-neutral-400">Max</Label>
+              <Input
+                type="number"
+                value={data.accumulatorConfig?.max ?? 1}
+                oninput={(e) => {
+                  const val =
+                    parseFloat((e.target as HTMLInputElement).value) || 1;
+                  const node = nodeGraph.getNode(props.id);
+                  if (node?.data?.accumulatorConfig) {
+                    node.data.accumulatorConfig.max = val;
+                  }
+                }}
+                onchange={(e) =>
+                  updateAccumulatorConfig(
+                    "max",
+                    parseFloat((e.target as HTMLInputElement).value) || 1,
+                  )}
+                class="h-6 text-xs bg-neutral-800 border-neutral-700 nodrag"
+              />
+            </div>
+          {/if}
         </div>
-      </div>
+      {/if}
       <div>
         <Label class="text-[10px] text-neutral-400">Mode</Label>
         <Select.Root
@@ -313,53 +339,57 @@
           </Select.Content>
         </Select.Root>
       </div>
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Frequency: {(data.oscillatorConfig?.frequency ?? 1).toFixed(2)} Hz
-        </Label>
-        <RangeSlider
-          value={data.oscillatorConfig?.frequency ?? 1}
-          min={0.01}
-          max={10}
-          step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && (node.data.oscillatorConfig as any)) {
-              (node.data.oscillatorConfig as any).frequency = val;
-            }
-          }}
-          onchange={(e) =>
-            updateOscillatorConfig(
-              "frequency",
-              parseFloat((e.target as HTMLInputElement).value),
-            )}
-        />
-      </div>
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Phase: {((data.oscillatorConfig?.phase ?? 0) * 360).toFixed(0)}°
-        </Label>
-        <RangeSlider
-          value={data.oscillatorConfig?.phase ?? 0}
-          min={0}
-          max={1}
-          step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && (node.data.oscillatorConfig as any)) {
-              (node.data.oscillatorConfig as any).phase = val;
-            }
-          }}
-          onchange={(e) =>
-            updateOscillatorConfig(
-              "phase",
-              parseFloat((e.target as HTMLInputElement).value),
-            )}
-        />
-      </div>
-      {#if data.oscillatorConfig?.waveform === "pulse"}
+      {#if !connectedInputs.has("frequency")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Frequency: {(data.oscillatorConfig?.frequency ?? 1).toFixed(2)} Hz
+          </Label>
+          <RangeSlider
+            value={data.oscillatorConfig?.frequency ?? 1}
+            min={0.01}
+            max={10}
+            step={0.01}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && (node.data.oscillatorConfig as any)) {
+                (node.data.oscillatorConfig as any).frequency = val;
+              }
+            }}
+            onchange={(e) =>
+              updateOscillatorConfig(
+                "frequency",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
+        </div>
+      {/if}
+      {#if !connectedInputs.has("phase")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Phase: {((data.oscillatorConfig?.phase ?? 0) * 360).toFixed(0)}°
+          </Label>
+          <RangeSlider
+            value={data.oscillatorConfig?.phase ?? 0}
+            min={0}
+            max={1}
+            step={0.01}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && (node.data.oscillatorConfig as any)) {
+                (node.data.oscillatorConfig as any).phase = val;
+              }
+            }}
+            onchange={(e) =>
+              updateOscillatorConfig(
+                "phase",
+                parseFloat((e.target as HTMLInputElement).value),
+              )}
+          />
+        </div>
+      {/if}
+      {#if data.oscillatorConfig?.waveform === "pulse" && !connectedInputs.has("pulseWidth")}
         <div>
           <Label class="text-[10px] text-neutral-400">
             Duty: {((data.oscillatorConfig?.pulseWidth ?? 0.5) * 100).toFixed(
@@ -449,31 +479,33 @@
           </Select.Content>
         </Select.Root>
       </div>
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Threshold: {(data.triggerConfig?.threshold ?? 0.5).toFixed(2)}
-        </Label>
-        <RangeSlider
-          value={data.triggerConfig?.threshold ?? 0.5}
-          min={0}
-          max={1}
-          step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && node.data.triggerConfig) {
-              node.data.triggerConfig.threshold = val;
-            }
-          }}
-          onchange={(e) =>
-            updateData({
-              triggerConfig: {
-                ...data.triggerConfig,
-                threshold: parseFloat((e.target as HTMLInputElement).value),
-              },
-            })}
-        />
-      </div>
+      {#if !connectedInputs.has("threshold")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Threshold: {(data.triggerConfig?.threshold ?? 0.5).toFixed(2)}
+          </Label>
+          <RangeSlider
+            value={data.triggerConfig?.threshold ?? 0.5}
+            min={0}
+            max={1}
+            step={0.01}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.triggerConfig) {
+                node.data.triggerConfig.threshold = val;
+              }
+            }}
+            onchange={(e) =>
+              updateData({
+                triggerConfig: {
+                  ...data.triggerConfig,
+                  threshold: parseFloat((e.target as HTMLInputElement).value),
+                },
+              })}
+          />
+        </div>
+      {/if}
       <!-- Trigger indicator -->
       <div
         class="h-8 rounded flex items-center justify-center transition-all duration-75"
@@ -487,62 +519,66 @@
     </div>
   {:else if data.utilityType === "noise"}
     <div class="space-y-2">
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Octaves: {data.noiseConfig?.octaves ?? 4}
-        </Label>
-        <RangeSlider
-          value={data.noiseConfig?.octaves ?? 4}
-          min={1}
-          max={8}
-          step={1}
-          oninput={(e) => {
-            const val = parseInt((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && node.data.noiseConfig) {
-              node.data.noiseConfig.octaves = val;
-            }
-          }}
-          onchange={(e) =>
-            updateData({
-              noiseConfig: {
-                ...data.noiseConfig,
-                octaves: parseInt((e.target as HTMLInputElement).value),
-              },
-            })}
-        />
-      </div>
+      {#if !connectedInputs.has("octaves")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Octaves: {data.noiseConfig?.octaves ?? 4}
+          </Label>
+          <RangeSlider
+            value={data.noiseConfig?.octaves ?? 4}
+            min={1}
+            max={8}
+            step={1}
+            oninput={(e) => {
+              const val = parseInt((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.noiseConfig) {
+                node.data.noiseConfig.octaves = val;
+              }
+            }}
+            onchange={(e) =>
+              updateData({
+                noiseConfig: {
+                  ...data.noiseConfig,
+                  octaves: parseInt((e.target as HTMLInputElement).value),
+                },
+              })}
+          />
+        </div>
+      {/if}
       <span class="text-[10px] text-neutral-500 font-mono">
         Value: {(value as number).toFixed(4)}
       </span>
     </div>
   {:else if data.utilityType === "delay"}
     <div class="space-y-2">
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Delay: {((data.delayConfig?.time ?? 0.1) * 1000).toFixed(0)}ms
-        </Label>
-        <RangeSlider
-          value={data.delayConfig?.time ?? 0.1}
-          min={0.01}
-          max={2}
-          step={0.01}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && node.data.delayConfig) {
-              node.data.delayConfig.time = val;
-            }
-          }}
-          onchange={(e) =>
-            updateData({
-              delayConfig: {
-                ...data.delayConfig,
-                time: parseFloat((e.target as HTMLInputElement).value),
-              },
-            })}
-        />
-      </div>
+      {#if !connectedInputs.has("time")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Delay: {((data.delayConfig?.time ?? 0.1) * 1000).toFixed(0)}ms
+          </Label>
+          <RangeSlider
+            value={data.delayConfig?.time ?? 0.1}
+            min={0.01}
+            max={2}
+            step={0.01}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.delayConfig) {
+                node.data.delayConfig.time = val;
+              }
+            }}
+            onchange={(e) =>
+              updateData({
+                delayConfig: {
+                  ...data.delayConfig,
+                  time: parseFloat((e.target as HTMLInputElement).value),
+                },
+              })}
+          />
+        </div>
+      {/if}
       <div class="flex gap-2 text-[10px] text-neutral-500 font-mono">
         <span>In: {((data.inputValues?.value as number) ?? 0).toFixed(3)}</span>
         <span>→</span>
@@ -551,34 +587,36 @@
     </div>
   {:else if data.utilityType === "hold"}
     <div class="space-y-2">
-      <div>
-        <Label class="text-[10px] text-neutral-400">
-          Hold Time: {data.holdConfig?.holdTime ?? 100}ms
-        </Label>
-        <RangeSlider
-          value={data.holdConfig?.holdTime ?? 100}
-          min={10}
-          max={1000}
-          step={10}
-          oninput={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            const node = nodeGraph.getNode(props.id);
-            if (node && node.data.holdConfig) {
-              node.data.holdConfig.holdTime = val;
-            }
-            if (node && node.data.inputValues) {
-              node.data.inputValues.holdTime = val;
-            }
-          }}
-          onchange={(e) => {
-            const val = parseFloat((e.target as HTMLInputElement).value);
-            updateData({
-              holdConfig: { ...data.holdConfig, holdTime: val },
-              inputValues: { ...data.inputValues, holdTime: val },
-            });
-          }}
-        />
-      </div>
+      {#if !connectedInputs.has("holdTime")}
+        <div>
+          <Label class="text-[10px] text-neutral-400">
+            Hold Time: {data.holdConfig?.holdTime ?? 100}ms
+          </Label>
+          <RangeSlider
+            value={data.holdConfig?.holdTime ?? 100}
+            min={10}
+            max={1000}
+            step={10}
+            oninput={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              const node = nodeGraph.getNode(props.id);
+              if (node && node.data.holdConfig) {
+                node.data.holdConfig.holdTime = val;
+              }
+              if (node && node.data.inputValues) {
+                node.data.inputValues.holdTime = val;
+              }
+            }}
+            onchange={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              updateData({
+                holdConfig: { ...data.holdConfig, holdTime: val },
+                inputValues: { ...data.inputValues, holdTime: val },
+              });
+            }}
+          />
+        </div>
+      {/if}
       <!-- Active indicator -->
       <div
         class="h-6 rounded flex items-center justify-center transition-all duration-75"

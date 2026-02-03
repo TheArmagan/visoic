@@ -7,7 +7,7 @@
 
 import { nodeGraph } from './graph';
 import { shaderManager, type RenderContext, type ShaderLayer, type BlendMode } from '../shader';
-import type { RenderContextNodeData, ShaderNodeData } from './types';
+import type { RenderContextNodeData, ShaderNodeData, MediaNodeData } from './types';
 
 // ============================================
 // Types
@@ -631,6 +631,9 @@ class RenderContextRuntime {
    * Updates shader uniforms based on dependencies
    */
   tick(time: number, deltaTime: number): void {
+    // Update media node outputs first (video frames, etc)
+    this.updateMediaNodeOutputs();
+
     // Process each context
     for (const [contextId, managed] of this.contexts) {
       const executionOrder = this.executionOrder.get(contextId) || [];
@@ -698,6 +701,111 @@ class RenderContextRuntime {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Update media node outputs and pass textures to shader inputs
+   * This handles Image Source and Video Source nodes
+   */
+  private updateMediaNodeOutputs(): void {
+    const nodes = nodeGraph.getNodes();
+    const edges = nodeGraph.getEdges();
+
+    // Find all media nodes
+    const mediaNodes = nodes.filter(
+      (n) => n.type === 'media:image' || n.type === 'media:video'
+    );
+
+    for (const mediaNode of mediaNodes) {
+      const data = mediaNode.data as MediaNodeData;
+
+      // Get the media element
+      const mediaElement = data._mediaElement;
+
+      // Update dimension outputs
+      if (mediaElement) {
+        let width = 0;
+        let height = 0;
+
+        if (mediaElement instanceof HTMLVideoElement) {
+          width = mediaElement.videoWidth;
+          height = mediaElement.videoHeight;
+
+          // Check if there's a node connection to the speed input
+          const speedEdge = edges.find(
+            (e) => e.target === mediaNode.id && e.targetHandle === 'speed'
+          );
+
+          // Update video settings
+          const loopInput = data.inputValues?.loop ?? data.loop;
+          const resetInput = data.inputValues?.reset;
+
+          if (loopInput !== undefined) {
+            mediaElement.loop = Boolean(loopInput);
+          }
+
+          // Only apply speed from inputValues if there's an actual node connection
+          // Otherwise, let the UI slider control playbackRate directly
+          if (speedEdge) {
+            const speedInput = data.inputValues?.speed;
+            if (speedInput !== undefined && !isNaN(Number(speedInput))) {
+              const newSpeed = Math.max(0.1, Math.min(4, Number(speedInput)));
+              if (mediaElement.playbackRate !== newSpeed) {
+                mediaElement.playbackRate = newSpeed;
+              }
+            }
+          }
+
+          // Handle reset - when reset becomes true, seek to beginning and reset the flag
+          if (resetInput === true) {
+            mediaElement.currentTime = 0;
+            if (mediaElement.paused) {
+              mediaElement.play().catch(() => { });
+            }
+            // Reset the flag back to false
+            nodeGraph.updateNodeDataSilent(mediaNode.id, {
+              inputValues: { ...data.inputValues, reset: false },
+            });
+          }
+        } else if (mediaElement instanceof HTMLImageElement) {
+          width = mediaElement.naturalWidth;
+          height = mediaElement.naturalHeight;
+        }
+
+        // Update outputs
+        if (width > 0 && height > 0) {
+          nodeGraph.updateNodeDataSilent(mediaNode.id, {
+            outputValues: {
+              image: mediaElement,
+              width,
+              height,
+            },
+          });
+        }
+      }
+
+      // Find shader nodes connected to this media node's image output
+      const connectedEdges = edges.filter(
+        (e) => e.source === mediaNode.id && e.sourceHandle === 'image'
+      );
+
+      for (const edge of connectedEdges) {
+        const targetNode = nodeGraph.getNode(edge.target);
+        if (!targetNode || targetNode.data.category !== 'shader') continue;
+
+        const runtime = this.shaderNodes.get(edge.target);
+        if (!runtime?.layer || !mediaElement) continue;
+
+        // Set the media element as a texture input for the shader
+        // Uses setUniform which handles both regular uniforms and texture inputs
+        const inputName = edge.targetHandle || 'inputImage';
+        try {
+          runtime.layer.setUniform(inputName, mediaElement);
+        } catch (e) {
+          // Texture input might not exist
+        }
+      }
+    }
   }
 
   // ============================================

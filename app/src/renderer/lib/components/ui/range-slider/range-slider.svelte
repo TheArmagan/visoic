@@ -29,17 +29,25 @@
       inputRef.value = String(value);
     }
   });
+
+  function handleInput(e: Event) {
+    oninput?.(e);
+  }
+
+  function handleChange(e: Event) {
+    onchange?.(e);
+  }
 </script>
 
 <input
   bind:this={inputRef}
   type="range"
-  value={value}
+  {value}
   {min}
   {max}
   {step}
   {disabled}
-  {oninput}
-  {onchange}
+  oninput={handleInput}
+  onchange={handleChange}
   class="nodrag w-full h-2 bg-neutral-700 rounded-lg appearance-none cursor-pointer accent-white {className}"
 />

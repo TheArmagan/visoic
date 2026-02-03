@@ -21,6 +21,8 @@ export { default as OutputNode } from './OutputNode.svelte';
 // @ts-ignore
 export { default as ShaderNode } from './ShaderNode.svelte';
 // @ts-ignore
+export { default as MediaNode } from './MediaNode.svelte';
+// @ts-ignore
 export { default as NodeSearchPopup } from './NodeSearchPopup.svelte';
 
 // Re-export node types mapping

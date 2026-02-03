@@ -307,6 +307,9 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     return this.placeholderTextureView!;
   }
 
+  // Cache for intermediate canvases used for aspect-ratio-preserving texture uploads
+  private intermediateCanvasCache: Map<string, OffscreenCanvas> = new Map();
+
   private updateLayerTextureFromExternalSource(
     layer: ShaderLayer,
     name: string,
@@ -314,10 +317,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   ): void {
     if (!this.device) return;
 
-    // Determine size
-    const width = (source as HTMLVideoElement).videoWidth ?? (source as HTMLImageElement).naturalWidth ?? (source as HTMLCanvasElement).width;
-    const height = (source as HTMLVideoElement).videoHeight ?? (source as HTMLImageElement).naturalHeight ?? (source as HTMLCanvasElement).height;
-    if (!width || !height) return;
+    // Determine source size
+    const srcWidth = (source as HTMLVideoElement).videoWidth ?? (source as HTMLImageElement).naturalWidth ?? (source as HTMLCanvasElement).width;
+    const srcHeight = (source as HTMLVideoElement).videoHeight ?? (source as HTMLImageElement).naturalHeight ?? (source as HTMLCanvasElement).height;
+    if (!srcWidth || !srcHeight) return;
+
+    // Use render context size for the texture to match shader expectations
+    const targetWidth = this.width;
+    const targetHeight = this.height;
 
     let perLayer = this.layerTextureViews.get(layer.id);
     if (!perLayer) {
@@ -325,43 +332,81 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       this.layerTextureViews.set(layer.id, perLayer);
     }
 
-    // Create a new texture each time size changes; otherwise, reuse the view.
+    // Check if we need a new texture (placeholder or size changed)
     const existing = perLayer.get(name);
-    const needsNew = existing === this.placeholderTextureView;
+    const needsNew = !existing || existing === this.placeholderTextureView;
 
-    if (needsNew) {
-      const texture = this.device.createTexture({
+    // Store texture alongside view for updates
+    const textureKey = `${layer.id}-${name}-gpu-texture`;
+    let gpuTexture = (this as unknown as Record<string, GPUTexture>)[textureKey];
+
+    if (needsNew || !gpuTexture) {
+      // Destroy old texture if exists
+      if (gpuTexture) {
+        gpuTexture.destroy();
+      }
+
+      gpuTexture = this.device.createTexture({
         label: `${layer.id}-${name}-texture`,
-        size: { width, height, depthOrArrayLayers: 1 },
+        size: { width: targetWidth, height: targetHeight, depthOrArrayLayers: 1 },
         format: 'rgba8unorm',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
       });
-      perLayer.set(name, texture.createView());
+      (this as unknown as Record<string, GPUTexture>)[textureKey] = gpuTexture;
+      perLayer.set(name, gpuTexture.createView());
+
+      // Mark that bind group needs recreation
+      this.bindGroupCache.delete(layer.id);
     }
 
-    // Best-effort upload for dynamic sources.
-    try {
-      const view = perLayer.get(name);
-      if (!view) return;
+    // Get or create intermediate canvas for aspect-ratio-preserving draw
+    const canvasKey = `${layer.id}-${name}-canvas`;
+    let intermediateCanvas = this.intermediateCanvasCache.get(canvasKey);
+    if (!intermediateCanvas || intermediateCanvas.width !== targetWidth || intermediateCanvas.height !== targetHeight) {
+      intermediateCanvas = new OffscreenCanvas(targetWidth, targetHeight);
+      this.intermediateCanvasCache.set(canvasKey, intermediateCanvas);
+    }
 
-      // Unfortunately WebGPU doesn't let us get the texture from a view; recreate on each update is heavy.
-      // For now, only upload when we just created the texture (placeholder -> real).
-      // Future improvement: store GPUTexture alongside the view.
-      if (needsNew) {
-        // Recreate the texture again to upload into it (since we don't retain the handle above).
-        const texture = this.device.createTexture({
-          label: `${layer.id}-${name}-texture-upload`,
-          size: { width, height, depthOrArrayLayers: 1 },
-          format: 'rgba8unorm',
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-        });
-        this.device.queue.copyExternalImageToTexture(
-          { source },
-          { texture },
-          { width, height, depthOrArrayLayers: 1 },
-        );
-        perLayer.set(name, texture.createView());
-      }
+    const ctx = intermediateCanvas.getContext('2d');
+    if (!ctx) return;
+
+    // Clear with black background
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+    // Calculate aspect-ratio-preserving dimensions
+    const srcAspect = srcWidth / srcHeight;
+    const targetAspect = targetWidth / targetHeight;
+
+    let drawWidth: number;
+    let drawHeight: number;
+    let drawX: number;
+    let drawY: number;
+
+    if (srcAspect > targetAspect) {
+      // Source is wider - fit to width
+      drawWidth = targetWidth;
+      drawHeight = targetWidth / srcAspect;
+      drawX = 0;
+      drawY = (targetHeight - drawHeight) / 2;
+    } else {
+      // Source is taller or equal - fit to height
+      drawHeight = targetHeight;
+      drawWidth = targetHeight * srcAspect;
+      drawX = (targetWidth - drawWidth) / 2;
+      drawY = 0;
+    }
+
+    // Draw source with aspect ratio preserved
+    ctx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
+
+    // Upload the intermediate canvas (which is now at target size with proper aspect ratio)
+    try {
+      this.device.queue.copyExternalImageToTexture(
+        { source: intermediateCanvas },
+        { texture: gpuTexture },
+        { width: targetWidth, height: targetHeight, depthOrArrayLayers: 1 },
+      );
     } catch (e) {
       console.warn(`[RenderContext] Failed to upload texture ${name} for layer ${layer.id}`, e);
     }
@@ -1330,17 +1375,36 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
           });
         }
 
-        // Best-effort texture upload for other image inputs
+        // Best-effort texture upload for all image inputs (including inputImage from external sources)
         const textures = layer.getTextureInputs();
+        let externalTextureUpdated = false;
         for (const [name, src] of textures.entries()) {
-          if (name === 'inputImage') continue; // Skip inputImage, already handled
           if (!src) continue;
+          // For inputImage, only process if it's an external source (not from another shader)
+          if (name === 'inputImage') {
+            // Check if this layer has a shader-to-shader dependency for inputImage
+            const inputSources = this.layerInputSources.get(layer.id);
+            if (inputSources?.has('inputImage')) {
+              continue; // Skip - inputImage comes from another shader
+            }
+          }
           const isImage = typeof HTMLImageElement !== 'undefined' && src instanceof HTMLImageElement;
           const isCanvas = typeof HTMLCanvasElement !== 'undefined' && src instanceof HTMLCanvasElement;
           const isVideo = typeof HTMLVideoElement !== 'undefined' && src instanceof HTMLVideoElement;
           if (isImage || isCanvas || isVideo) {
             this.updateLayerTextureFromExternalSource(layer, name, src);
+            externalTextureUpdated = true;
           }
+        }
+
+        // If external texture was updated and bind group was invalidated, recreate it
+        if (externalTextureUpdated && !this.bindGroupCache.has(layer.id)) {
+          this.recreateBindGroupForLayer(layer);
+          const inputImageView = this.layerTextureViews.get(layer.id)?.get('inputImage') ?? null;
+          this.bindGroupCache.set(layer.id, {
+            bindGroup: layer.bindGroup!,
+            inputImageView,
+          });
         }
 
         // Update uniforms using double-buffered uniform buffer

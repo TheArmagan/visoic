@@ -15,6 +15,7 @@ import type {
   UtilityNodeData,
   OutputNodeData,
   ShaderNodeData,
+  MediaNodeData,
 } from './types';
 
 class NodeRegistry {
@@ -199,6 +200,83 @@ nodeRegistry.register({
     ],
     inputValues: {},
     outputValues: { vec: [0, 0, 0], x: 0, y: 0, z: 0 },
+  }),
+});
+
+// ============================================
+// Media Nodes
+// ============================================
+
+nodeRegistry.register({
+  type: 'media:image',
+  label: 'Image Source',
+  description: 'Load an image file as a texture source for shaders',
+  category: 'value',
+  icon: '🖼️',
+  tags: ['image', 'picture', 'texture', 'source', 'file', 'media'],
+  inputs: [],
+  outputs: [
+    { type: 'output', id: 'image', label: 'Image', dataType: 'image' },
+    { type: 'output', id: 'width', label: 'Width', dataType: 'number' },
+    { type: 'output', id: 'height', label: 'Height', dataType: 'number' },
+  ],
+  createDefaultData: () => ({
+    label: 'Image Source',
+    category: 'value' as const,
+    mediaType: 'image' as const,
+    filePath: undefined,
+    width: undefined,
+    height: undefined,
+    inputs: [],
+    outputs: [
+      { type: 'output' as const, id: 'image', label: 'Image', dataType: 'image' as const },
+      { type: 'output' as const, id: 'width', label: 'Width', dataType: 'number' as const },
+      { type: 'output' as const, id: 'height', label: 'Height', dataType: 'number' as const },
+    ],
+    inputValues: {},
+    outputValues: { image: null, width: 0, height: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'media:video',
+  label: 'Video Source',
+  description: 'Load a video file as a texture source for shaders with playback controls',
+  category: 'value',
+  icon: '🎬',
+  tags: ['video', 'movie', 'texture', 'source', 'file', 'media', 'playback'],
+  inputs: [
+    { type: 'input', id: 'loop', label: 'Loop', dataType: 'boolean', defaultValue: true },
+    { type: 'input', id: 'speed', label: 'Speed', dataType: 'number', defaultValue: 1, min: 0.1, max: 4, step: 0.1 },
+    { type: 'input', id: 'reset', label: 'Reset', dataType: 'boolean', defaultValue: false },
+  ],
+  outputs: [
+    { type: 'output', id: 'image', label: 'Video', dataType: 'image' },
+    { type: 'output', id: 'width', label: 'Width', dataType: 'number' },
+    { type: 'output', id: 'height', label: 'Height', dataType: 'number' },
+  ],
+  createDefaultData: () => ({
+    label: 'Video Source',
+    category: 'value' as const,
+    mediaType: 'video' as const,
+    filePath: undefined,
+    loop: true,
+    playbackSpeed: 1,
+    autoplay: true,
+    width: undefined,
+    height: undefined,
+    inputs: [
+      { type: 'input' as const, id: 'loop', label: 'Loop', dataType: 'boolean' as const, defaultValue: true },
+      { type: 'input' as const, id: 'speed', label: 'Speed', dataType: 'number' as const, defaultValue: 1, min: 0.1, max: 4, step: 0.1 },
+      { type: 'input' as const, id: 'reset', label: 'Reset', dataType: 'boolean' as const, defaultValue: false },
+    ],
+    outputs: [
+      { type: 'output' as const, id: 'image', label: 'Video', dataType: 'image' as const },
+      { type: 'output' as const, id: 'width', label: 'Width', dataType: 'number' as const },
+      { type: 'output' as const, id: 'height', label: 'Height', dataType: 'number' as const },
+    ],
+    inputValues: { loop: true, speed: 1, reset: false },
+    outputValues: { image: null, width: 0, height: 0 },
   }),
 });
 

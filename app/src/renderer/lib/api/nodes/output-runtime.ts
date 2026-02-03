@@ -334,15 +334,20 @@ class OutputRuntimeManager {
       if (shaderCanvas) return shaderCanvas;
     }
 
-    // Check outputValues
+    // Check outputValues - try common output keys
     if (sourceNode?.data.outputValues) {
-      const frame = sourceNode.data.outputValues['output'];
-      if (frame instanceof HTMLCanvasElement ||
-        frame instanceof OffscreenCanvas ||
-        frame instanceof ImageBitmap ||
-        frame instanceof HTMLImageElement ||
-        frame instanceof HTMLVideoElement) {
-        return frame;
+      const outputValues = sourceNode.data.outputValues;
+      // Check common output keys in priority order
+      const keysToCheck = ['output', 'image', 'video', 'texture', 'canvas'];
+      for (const key of keysToCheck) {
+        const frame = outputValues[key];
+        if (frame instanceof HTMLCanvasElement ||
+          frame instanceof OffscreenCanvas ||
+          frame instanceof ImageBitmap ||
+          frame instanceof HTMLImageElement ||
+          frame instanceof HTMLVideoElement) {
+          return frame;
+        }
       }
     }
 
@@ -387,6 +392,17 @@ class OutputRuntimeManager {
             }
           }
         }
+
+        // Fallback: If shader has no render context, trace through its inputImage
+        // This allows Image Source -> Shader -> Window Output without explicit render context
+        const inputImageEdge = nodeGraph.getEdgeToInput(edge.source, 'inputImage');
+        if (inputImageEdge) {
+          // Recursively find the frame source from the shader's input
+          const inputSource = this.findFrameSourceFromNode(inputImageEdge.source, inputImageEdge.sourceHandle);
+          if (inputSource) {
+            return inputSource;
+          }
+        }
       }
 
       // Check other source outputs
@@ -401,6 +417,30 @@ class OutputRuntimeManager {
           frame instanceof HTMLVideoElement) {
           return { source: frame, sourceNodeId: edge.source };
         }
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Find frame source from a specific node and handle (helper for tracing through shader inputs)
+   */
+  private findFrameSourceFromNode(nodeId: string, handleId: string | null | undefined): { source: CanvasImageSource; sourceNodeId: string } | null {
+    const node = nodeGraph.getNode(nodeId);
+    if (!node) return null;
+
+    // Check outputValues for the specific handle
+    if (node.data.outputValues) {
+      const outputKey = handleId || 'output';
+      const frame = node.data.outputValues[outputKey];
+
+      if (frame instanceof HTMLCanvasElement ||
+        frame instanceof OffscreenCanvas ||
+        frame instanceof ImageBitmap ||
+        frame instanceof HTMLImageElement ||
+        frame instanceof HTMLVideoElement) {
+        return { source: frame, sourceNodeId: nodeId };
       }
     }
 
@@ -477,15 +517,56 @@ class OutputRuntimeManager {
         // If we have a frame source, render it
         if (frameSource) {
           // Get source dimensions
-          const srcWidth = 'width' in frameSource ? frameSource.width : (frameSource as any).videoWidth || entry.canvas.width;
-          const srcHeight = 'height' in frameSource ? frameSource.height : (frameSource as any).videoHeight || entry.canvas.height;
+          let srcWidth: number;
+          let srcHeight: number;
 
+          if (frameSource instanceof HTMLVideoElement) {
+            srcWidth = frameSource.videoWidth || entry.canvas.width;
+            srcHeight = frameSource.videoHeight || entry.canvas.height;
+          } else if (frameSource instanceof HTMLImageElement) {
+            srcWidth = frameSource.naturalWidth || entry.canvas.width;
+            srcHeight = frameSource.naturalHeight || entry.canvas.height;
+          } else {
+            srcWidth = 'width' in frameSource ? frameSource.width as number : entry.canvas.width;
+            srcHeight = 'height' in frameSource ? frameSource.height as number : entry.canvas.height;
+          }
+
+          // Calculate aspect-ratio-preserving dimensions (fit inside canvas)
+          const canvasWidth = entry.canvas.width;
+          const canvasHeight = entry.canvas.height;
+          const srcAspect = srcWidth / srcHeight;
+          const canvasAspect = canvasWidth / canvasHeight;
+
+          let drawWidth: number;
+          let drawHeight: number;
+          let drawX: number;
+          let drawY: number;
+
+          if (srcAspect > canvasAspect) {
+            // Source is wider - fit to width
+            drawWidth = canvasWidth;
+            drawHeight = canvasWidth / srcAspect;
+            drawX = 0;
+            drawY = (canvasHeight - drawHeight) / 2;
+          } else {
+            // Source is taller - fit to height
+            drawHeight = canvasHeight;
+            drawWidth = canvasHeight * srcAspect;
+            drawX = (canvasWidth - drawWidth) / 2;
+            drawY = 0;
+          }
+
+          // Clear canvas with black background for letterboxing
+          entry.ctx.fillStyle = '#000000';
+          entry.ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+          // Draw with aspect ratio preserved
           entry.ctx.drawImage(
             frameSource,
             0, 0,
             srcWidth, srcHeight,
-            0, 0,
-            entry.canvas.width, entry.canvas.height
+            drawX, drawY,
+            drawWidth, drawHeight
           );
         } else {
           // No source - draw a placeholder

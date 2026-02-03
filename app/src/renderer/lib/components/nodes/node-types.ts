@@ -21,6 +21,8 @@ import BaseNode from './BaseNode.svelte';
 import OutputNode from './OutputNode.svelte';
 // @ts-ignore
 import RenderContextNode from './RenderContextNode.svelte';
+// @ts-ignore
+import MediaNode from './MediaNode.svelte';
 
 // Define our own node types mapping (SvelteFlow compatible)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,6 +37,10 @@ export const nodeTypes: NodeTypesMap = {
   'value:color': ValueNode,
   'value:vec2': ValueNode,
   'value:vec3': ValueNode,
+
+  // Media nodes
+  'media:image': MediaNode,
+  'media:video': MediaNode,
 
   // Math nodes
   'math:add': MathNode,
@@ -119,6 +125,8 @@ export function getNodeComponent(type: string): NodeComponent {
   switch (prefix) {
     case 'value':
       return ValueNode;
+    case 'media':
+      return MediaNode;
     case 'math':
       return MathNode;
     case 'audio':
@@ -177,7 +185,7 @@ const nodeTypesProxy = new Proxy(nodeTypes, {
     if (prop in target) return true;
     // All prefixed types are valid
     const prefix = prop.split(':')[0];
-    return ['value', 'math', 'audio', 'logic', 'utility', 'output', 'render', 'shader'].includes(prefix);
+    return ['value', 'media', 'math', 'audio', 'logic', 'utility', 'output', 'render', 'shader'].includes(prefix);
   },
 });
 

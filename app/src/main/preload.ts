@@ -44,6 +44,13 @@ contextBridge.exposeInMainWorld('VISOICNative', {
     loadFromFile: (filePath: string): Promise<{ success: boolean; content?: string; error?: string }> =>
       ipcRenderer.invoke('graph:loadFromFile', filePath),
   },
+  // Media File API
+  media: {
+    showOpenDialog: (options: { type: 'image' | 'video' }): Promise<{ canceled: boolean; filePaths: string[] }> =>
+      ipcRenderer.invoke('media:showOpenDialog', options),
+    readFile: (filePath: string): Promise<{ success: boolean; data?: ArrayBuffer; mimeType?: string; error?: string }> =>
+      ipcRenderer.invoke('media:readFile', filePath),
+  },
   // Shader Test Suite API
   shaderTest: {
     // Send test progress to main process (for CLI clients)

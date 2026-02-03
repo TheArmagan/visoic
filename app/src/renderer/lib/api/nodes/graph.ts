@@ -245,14 +245,24 @@ class NodeGraphManager {
 
     // Deep merge for nested objects like inputValues, outputValues, etc.
     for (const [key, value] of Object.entries(dataUpdates)) {
-      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      // Check if it's a DOM element or special object that shouldn't be spread
+      const isSpecialObject = value instanceof HTMLElement ||
+        value instanceof HTMLImageElement ||
+        value instanceof HTMLVideoElement ||
+        value instanceof HTMLCanvasElement ||
+        value instanceof OffscreenCanvas ||
+        value instanceof ImageBitmap ||
+        value instanceof ArrayBuffer ||
+        value instanceof Blob;
+
+      if (value !== null && typeof value === 'object' && !Array.isArray(value) && !isSpecialObject) {
         // Merge nested objects
         (node.data as Record<string, unknown>)[key] = {
           ...((node.data as Record<string, unknown>)[key] as Record<string, unknown> ?? {}),
           ...value,
         };
       } else {
-        // Direct assignment for primitives and arrays
+        // Direct assignment for primitives, arrays, and special objects (DOM elements, etc.)
         (node.data as Record<string, unknown>)[key] = value;
       }
     }
