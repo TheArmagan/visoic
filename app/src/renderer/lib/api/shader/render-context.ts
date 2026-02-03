@@ -90,6 +90,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private cachedBlitBindGroup: GPUBindGroup | null = null;
   private cachedBlitTextureId: 'A' | 'B' | null = null;
 
+  // Cached per-layer blit bind groups for layer output canvases
+  private cachedLayerBlitBindGroups: Map<string, GPUBindGroup> = new Map();
+  private cachedLayerBlitTextureViews: Map<string, GPUTextureView> = new Map();
+
   // Cached Date object to avoid allocations
   private cachedDate: Date = new Date();
 
@@ -121,6 +125,9 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     this.context.configure({
       device: this.device,
       format: this.format,
+      // Keep premultiplied alpha. Some inputs (e.g. PNG) may have non-black RGB
+      // under transparent pixels; we premultiply in the blit shader to avoid
+      // white showing up when scaling/exposing transparency.
       alphaMode: 'premultiplied',
     });
 
@@ -168,6 +175,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private createIntermediateTextures(): void {
     if (!this.device) return;
 
+    // Clean up all layer output textures when intermediate textures are recreated
+    // (they depend on the same size)
+    this.destroyAllLayerOutputTextures();
+
     const size = {
       width: this.canvas.width,
       height: this.canvas.height,
@@ -178,14 +189,14 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
       label: `${this.id}-intermediate-A`,
       size,
       format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
 
     this.intermediateTextureB = this.device.createTexture({
       label: `${this.id}-intermediate-B`,
       size,
       format: this.format,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
 
     this.intermediateTextureViewA = this.intermediateTextureA.createView();
@@ -195,6 +206,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     // Invalidate cached blit bind group since textures changed
     this.cachedBlitBindGroup = null;
     this.cachedBlitTextureId = null;
+
+    // Invalidate cached per-layer blit bind groups since output textures may change
+    this.cachedLayerBlitBindGroups.clear();
+    this.cachedLayerBlitTextureViews.clear();
   }
 
   /**
@@ -235,7 +250,10 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
       @fragment
       fn fragmentMain(@location(0) uv: vec2f) -> @location(0) vec4f {
-        return textureSample(srcTexture, srcSampler, uv);
+        // Premultiply for correct presentation on canvases which assume premultiplied alpha.
+        // Prevents white RGB under transparent pixels from showing up as white.
+        let c = textureSample(srcTexture, srcSampler, uv);
+        return vec4f(c.rgb * c.a, c.a);
       }
     `;
 
@@ -316,6 +334,11 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     source: HTMLImageElement | HTMLVideoElement | HTMLCanvasElement,
   ): void {
     if (!this.device) return;
+
+    // Check if image is loaded
+    if (source instanceof HTMLImageElement && !source.complete) {
+      return; // Image not loaded yet
+    }
 
     // Determine source size
     const srcWidth = (source as HTMLVideoElement).videoWidth ?? (source as HTMLImageElement).naturalWidth ?? (source as HTMLCanvasElement).width;
@@ -439,6 +462,12 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
       // Recreate intermediate textures with new size
       this.createIntermediateTextures();
+    }
+
+    // Resize any per-layer output canvases to match new render resolution
+    for (const canvas of this.layerOutputCanvases.values()) {
+      canvas.width = this.canvas.width;
+      canvas.height = this.canvas.height;
     }
 
     this.emit('resize', { width, height });
@@ -652,9 +681,15 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   private ensureLayerOutputTexture(layerId: string): void {
     if (!this.device || this.layerOutputTextures.has(layerId)) return;
 
+    // Match the actual render resolution (canvas is pixelRatio-scaled).
+    // Using logical width/height here can cause size mismatches and black output
+    // when copying/blitting textures.
+    const textureWidth = this.canvas.width;
+    const textureHeight = this.canvas.height;
+
     const texture = this.device.createTexture({
       label: `layer-output-${layerId}`,
-      size: [this.width, this.height],
+      size: [textureWidth, textureHeight],
       format: this.format,
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
@@ -676,6 +711,71 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
   }
 
   /**
+   * Clean up all layer output textures (called on resize)
+   */
+  private destroyAllLayerOutputTextures(): void {
+    for (const [layerId, texture] of this.layerOutputTextures) {
+      texture.destroy();
+      this.layerOutputTextureViews.delete(layerId);
+    }
+    this.layerOutputTextures.clear();
+
+    // Invalidate cached per-layer blit bind groups
+    this.cachedLayerBlitBindGroups.clear();
+    this.cachedLayerBlitTextureViews.clear();
+  }
+
+  private getOrCreateLayerBlitBindGroup(layerId: string, textureView: GPUTextureView): GPUBindGroup | null {
+    if (!this.device || !this.blitBindGroupLayout || !this.blitSampler) return null;
+
+    const cachedView = this.cachedLayerBlitTextureViews.get(layerId);
+    if (cachedView === textureView) {
+      return this.cachedLayerBlitBindGroups.get(layerId) ?? null;
+    }
+
+    const bindGroup = this.device.createBindGroup({
+      label: `blit-layer-${layerId}`,
+      layout: this.blitBindGroupLayout,
+      entries: [
+        { binding: 0, resource: textureView },
+        { binding: 1, resource: this.blitSampler },
+      ],
+    });
+
+    this.cachedLayerBlitTextureViews.set(layerId, textureView);
+    this.cachedLayerBlitBindGroups.set(layerId, bindGroup);
+    return bindGroup;
+  }
+
+  private recordLayerBlitPass(commandEncoder: GPUCommandEncoder, layerId: string): void {
+    if (!this.device || !this.blitPipeline) return;
+
+    const textureView = this.layerOutputTextureViews.get(layerId);
+    const gpuContext = this.layerOutputCanvasContexts.get(layerId);
+    if (!textureView || !gpuContext) return;
+
+    const bindGroup = this.getOrCreateLayerBlitBindGroup(layerId, textureView);
+    if (!bindGroup) return;
+
+    const canvasTextureView = gpuContext.getCurrentTexture().createView();
+    const blitPass = commandEncoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: canvasTextureView,
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        },
+      ],
+    });
+
+    blitPass.setPipeline(this.blitPipeline);
+    blitPass.setBindGroup(0, bindGroup);
+    blitPass.draw(3);
+    blitPass.end();
+  }
+
+  /**
    * Ensure a layer has an output canvas for viewing its individual output
    */
   ensureLayerOutputCanvas(layerId: string): HTMLCanvasElement | null {
@@ -687,8 +787,9 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
 
     // Create new canvas for this layer
     canvas = document.createElement('canvas');
-    canvas.width = this.width;
-    canvas.height = this.height;
+    // Match the actual render resolution (pixelRatio-scaled)
+    canvas.width = this.canvas.width;
+    canvas.height = this.canvas.height;
     canvas.style.width = '100%';
     canvas.style.height = '100%';
 
@@ -734,35 +835,11 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     if (!textureView || !gpuContext) return;
 
     try {
-      const canvasTextureView = gpuContext.getCurrentTexture().createView();
-
-      // Create bind group for blit
-      const blitBindGroup = this.device.createBindGroup({
-        label: `blit-layer-${layerId}`,
-        layout: this.blitBindGroupLayout,
-        entries: [
-          { binding: 0, resource: textureView },
-          { binding: 1, resource: this.blitSampler },
-        ],
-      });
-
       const commandEncoder = this.device.createCommandEncoder();
 
-      const blitPass = commandEncoder.beginRenderPass({
-        colorAttachments: [
-          {
-            view: canvasTextureView,
-            loadOp: 'clear',
-            storeOp: 'store',
-            clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          },
-        ],
-      });
-
-      blitPass.setPipeline(this.blitPipeline);
-      blitPass.setBindGroup(0, blitBindGroup);
-      blitPass.draw(3);
-      blitPass.end();
+      // Legacy path: still submits its own command buffer.
+      // Optimized path records these passes into the main frame encoder.
+      this.recordLayerBlitPass(commandEncoder, layerId);
 
       this.device.queue.submit([commandEncoder.finish()]);
     } catch (error) {
@@ -1265,6 +1342,26 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
     // Create command encoder
     const commandEncoder = this.device.createCommandEncoder();
 
+    // Determine which layers need persistent output textures/canvases this frame.
+    // This avoids unnecessary copies and ensures dependency sources are recreated after resize.
+    const requiredOutputLayers = new Set<string>();
+
+    // Layers with dedicated output canvases (used by Window Output etc)
+    for (const layerId of this.layerOutputCanvasContexts.keys()) {
+      requiredOutputLayers.add(layerId);
+    }
+
+    // Layers referenced as inputs by other layers
+    for (const inputMap of this.layerInputSources.values()) {
+      for (const sourceLayerId of inputMap.values()) {
+        requiredOutputLayers.add(sourceLayerId);
+      }
+    }
+
+    for (const layerId of requiredOutputLayers) {
+      this.ensureLayerOutputTexture(layerId);
+    }
+
     // Rebuild resources for layers that need it (e.g., blend mode changed)
     for (const layerId of this.layerOrder) {
       const layer = this.layers.get(layerId);
@@ -1305,7 +1402,6 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         const layerId = enabledLayers[i];
         const layer = this.layers.get(layerId)!;
         const isFirstLayer = i === 0;
-        const isLastLayer = i === enabledLayers.length - 1;
 
         // Get layer inputs for texture binding
         const inputs = layer.getCompileResult()?.inputs || [];
@@ -1339,14 +1435,27 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
           const sourceLayerId = inputSourceMap?.get(inputName);
           if (sourceLayerId) {
             // Use the output texture from the source layer
+            this.ensureLayerOutputTexture(sourceLayerId);
             sourceTextureView = this.layerOutputTextureViews.get(sourceLayerId) ?? null;
           } else if (inputName === 'inputImage' && previousOutputTexture && !isFirstLayer) {
-            // Fallback: use previous layer's output for inputImage (legacy behavior)
-            sourceTextureView = previousOutputTexture === 'A'
-              ? this.intermediateTextureViewA!
-              : this.intermediateTextureViewB!;
+            // Check if this layer has an external texture (e.g., from MediaNode)
+            // If so, don't override with intermediate texture
+            const perLayer = this.layerTextureViews.get(layer.id);
+            const existingView = perLayer?.get(inputName);
+
+            // Only use intermediate texture if:
+            // 1. No existing view, or
+            // 2. Existing view is placeholder
+            // Never override an external texture with intermediate
+            if (!existingView || existingView === this.placeholderTextureView) {
+              // Fallback: use previous layer's output for inputImage (legacy behavior)
+              sourceTextureView = previousOutputTexture === 'A'
+                ? this.intermediateTextureViewA!
+                : this.intermediateTextureViewB!;
+            }
           }
 
+          // Only update if we have a new source AND it's different from current
           if (sourceTextureView) {
             // Check if texture view changed
             let perLayer = this.layerTextureViews.get(layer.id);
@@ -1441,6 +1550,21 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         // Write to layer's uniform buffer (WebGPU handles synchronization internally)
         this.device!.queue.writeBuffer(layer.uniformBuffer!, 0, uniformData.buffer);
 
+        // IMPORTANT: We ping-pong between intermediate textures (A/B). For blending-based
+        // compositing, the render target must already contain the previous composite.
+        // Otherwise, transparent pixels will preserve stale data from the last frame.
+        if (!isFirstLayer && previousOutputTexture && currentOutputTexture) {
+          const srcTexture = previousOutputTexture === 'A' ? this.intermediateTextureA : this.intermediateTextureB;
+          const dstTexture = currentOutputTexture === 'A' ? this.intermediateTextureA : this.intermediateTextureB;
+          if (srcTexture && dstTexture) {
+            commandEncoder.copyTextureToTexture(
+              { texture: srcTexture },
+              { texture: dstTexture },
+              { width: this.canvas.width, height: this.canvas.height, depthOrArrayLayers: 1 },
+            );
+          }
+        }
+
         // Create render pass
         const renderPass = commandEncoder.beginRenderPass({
           colorAttachments: [
@@ -1458,22 +1582,22 @@ export class RenderContext extends EventEmitter<RenderContextEvents> {
         renderPass.draw(3); // Full-screen triangle
         renderPass.end();
 
-        // Always ensure this layer has an output texture for potential consumers
-        this.ensureLayerOutputTexture(layerId);
+        // Persist this layer's output only if required (dependencies / output canvas).
+        if (requiredOutputLayers.has(layerId)) {
+          const destTexture = this.layerOutputTextures.get(layerId);
+          const srcTexture = currentOutputTexture === 'A' ? this.intermediateTextureA : this.intermediateTextureB;
+          if (destTexture && srcTexture) {
+            commandEncoder.copyTextureToTexture(
+              { texture: srcTexture },
+              { texture: destTexture },
+              { width: this.canvas.width, height: this.canvas.height, depthOrArrayLayers: 1 },
+            );
+          }
 
-        // Copy the rendered result to the layer's output texture
-        // This allows the output to be accessed independently or used by other layers
-        const layerOutputTexture = this.layerOutputTextures.get(layerId);
-        if (layerOutputTexture && currentOutputTexture) {
-          const sourceTexture = currentOutputTexture === 'A'
-            ? this.intermediateTextureA!
-            : this.intermediateTextureB!;
-
-          commandEncoder.copyTextureToTexture(
-            { texture: sourceTexture },
-            { texture: layerOutputTexture },
-            [this.width, this.height]
-          );
+          // If this layer has a dedicated output canvas, blit to it in the same command buffer.
+          if (this.layerOutputCanvasContexts.has(layerId)) {
+            this.recordLayerBlitPass(commandEncoder, layerId);
+          }
         }
 
         // Update previousOutputTexture for next layer to read from

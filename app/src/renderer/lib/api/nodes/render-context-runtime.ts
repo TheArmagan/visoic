@@ -800,7 +800,6 @@ class RenderContextRuntime {
         if (!runtime?.layer || !mediaElement) continue;
 
         // Set the media element as a texture input for the shader
-        // Uses setUniform which handles both regular uniforms and texture inputs
         const inputName = edge.targetHandle || 'inputImage';
         try {
           runtime.layer.setUniform(inputName, mediaElement);
@@ -849,8 +848,9 @@ class RenderContextRuntime {
     // Get or create the layer's output canvas
     const canvas = managed.context.getLayerOutputCanvas(shaderNodeId);
 
-    // Blit the current frame to the canvas
-    if (canvas) {
+    // Optimized: layer output canvases are updated once per render frame inside RenderContext.
+    // Fallback: if the context isn't running (should be rare), do a one-off blit.
+    if (canvas && !managed.context.isRunning()) {
       managed.context.blitLayerOutputToCanvas(shaderNodeId);
     }
 

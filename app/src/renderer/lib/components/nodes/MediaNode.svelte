@@ -26,9 +26,10 @@
       }) => Promise<{ canceled: boolean; filePaths: string[] }>;
       readFile: (filePath: string) => Promise<{
         success: boolean;
-        data?: ArrayBuffer;
+        data?: ArrayBuffer | string;
         mimeType?: string;
         error?: string;
+        isBase64?: boolean;
       }>;
       getDesktopSources: () => Promise<{
         success: boolean;
@@ -49,14 +50,16 @@
     liveData = newData as MediaNodeData;
   });
 
-  // Preview canvas and video element
-  let previewCanvas = $state<HTMLCanvasElement | null>(null);
-  let videoElement = $state<HTMLVideoElement | null>(null);
-  let imageElement = $state<HTMLImageElement | null>(null);
-  let blobUrl = $state<string | null>(null);
-  let imageLoaded = $state(false);
-  let videoLoaded = $state(false);
+  // Preview canvas and video element - NOT reactive to avoid re-render loops
+  let previewCanvas: HTMLCanvasElement | null = null;
+  let videoElement: HTMLVideoElement | null = null;
+  let imageElement: HTMLImageElement | null = null;
+  let blobUrl: string | null = null;
+  let imageLoaded = false;
+  let videoLoaded = false;
   let captureActive = $state(false);
+  let videoPaused = $state(true); // Only this is reactive for UI
+  let previewUpdated = false; // Flag to prevent repeated preview updates
   let mediaStream: MediaStream | null = null; // Local reference, not in node data
 
   // Desktop sources list
@@ -143,8 +146,22 @@
         return;
       }
 
+      // Handle base64 encoded data from IPC
+      let blobData: BlobPart;
+      if (result.isBase64 && typeof result.data === "string") {
+        // Decode base64 to ArrayBuffer
+        const binary = atob(result.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        blobData = bytes;
+      } else {
+        blobData = result.data as ArrayBuffer;
+      }
+
       // Create blob URL from buffer
-      const blob = new Blob([result.data], {
+      const blob = new Blob([blobData], {
         type: result.mimeType || "video/mp4",
       });
 
@@ -172,7 +189,12 @@
         videoLoaded = true;
 
         if (data.autoplay !== false) {
-          videoElement!.play().catch(console.error);
+          videoElement!
+            .play()
+            .then(() => {
+              videoPaused = false;
+            })
+            .catch(console.error);
         }
       };
 
@@ -190,13 +212,28 @@
 
       // Read file via IPC
       const result = await nativeAPI?.media?.readFile(filePath);
+
       if (!result?.success || !result.data) {
         console.error("Failed to load image:", result?.error);
         return;
       }
 
+      // Handle base64 encoded data from IPC
+      let blobData: BlobPart;
+      if (result.isBase64 && typeof result.data === "string") {
+        // Decode base64 to ArrayBuffer
+        const binary = atob(result.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        blobData = bytes;
+      } else {
+        blobData = result.data as ArrayBuffer;
+      }
+
       // Create blob URL from buffer
-      const blob = new Blob([result.data], {
+      const blob = new Blob([blobData], {
         type: result.mimeType || "image/png",
       });
 
@@ -217,6 +254,18 @@
         updateSetting("height", imageElement!.naturalHeight);
         updateSetting("_mediaElement", imageElement);
         imageLoaded = true;
+        previewUpdated = false;
+        // Trigger preview update after a short delay to ensure canvas is bound
+        setTimeout(() => {
+          if (previewCanvas && !previewUpdated) {
+            previewUpdated = true;
+            updatePreview();
+          }
+        }, 50);
+      };
+
+      imageElement.onerror = (e) => {
+        console.error("[MediaNode] Image load error:", e);
       };
     } catch (e) {
       console.error("Failed to load image:", e);
@@ -385,29 +434,25 @@
     ctx.drawImage(source, drawX, drawY, drawWidth, drawHeight);
   }
 
-  // Update preview when canvas is ready and image is loaded
-  $effect(() => {
-    if (
-      previewCanvas &&
-      imageElement &&
-      imageLoaded &&
-      data.mediaType === "image"
-    ) {
+  // Svelte action for canvas binding
+  function canvasAction(canvas: HTMLCanvasElement) {
+    previewCanvas = canvas;
+    // Update preview if image is already loaded
+    if (imageLoaded && data.mediaType === "image" && !previewUpdated) {
+      previewUpdated = true;
       updatePreview();
     }
-  });
+    // Update preview if video is already loaded
+    if (videoLoaded && data.mediaType === "video") {
+      updatePreview();
+    }
 
-  // Update preview when canvas is ready and video is loaded
-  $effect(() => {
-    if (
-      previewCanvas &&
-      videoElement &&
-      videoLoaded &&
-      data.mediaType === "video"
-    ) {
-      updatePreview();
-    }
-  });
+    return {
+      destroy() {
+        previewCanvas = null;
+      },
+    };
+  }
 
   // Update video settings when they change
   $effect(() => {
@@ -421,16 +466,27 @@
     if (!videoElement) return;
 
     if (videoElement.paused) {
-      videoElement.play().catch(console.error);
+      videoElement
+        .play()
+        .then(() => {
+          videoPaused = false;
+        })
+        .catch(console.error);
     } else {
       videoElement.pause();
+      videoPaused = true;
     }
   }
 
   function restartVideo() {
     if (!videoElement) return;
     videoElement.currentTime = 0;
-    videoElement.play().catch(console.error);
+    videoElement
+      .play()
+      .then(() => {
+        videoPaused = false;
+      })
+      .catch(console.error);
   }
 
   const fileName = $derived(
@@ -576,7 +632,7 @@
     {#if data.filePath || captureActive}
       <div class="relative">
         <canvas
-          bind:this={previewCanvas}
+          use:canvasAction
           width="160"
           height="90"
           class="w-full h-auto rounded bg-black"
@@ -603,7 +659,7 @@
             onclick={togglePlayback}
             class="h-6 px-2 text-xs nodrag"
           >
-            {videoElement?.paused ? "▶" : "⏸"}
+            {videoPaused ? "▶" : "⏸"}
           </Button>
           <Button
             variant="ghost"
