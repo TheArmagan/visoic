@@ -3,7 +3,7 @@
 // ============================================
 
 // Re-export ISF loader for external use
-export { isfLoader, type ISFShaderInfo, type ISFShaderSource } from './isf-loader';
+export { isfLoader, type ISFShaderInfo, type ISFShaderSource, type ShaderValidationResult } from './isf-loader';
 
 /**
  * Get all available shader categories

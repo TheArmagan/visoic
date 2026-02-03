@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onDestroy } from "svelte";
   import { useSvelteFlow, useEdges } from "@xyflow/svelte";
   import type { UtilityNodeData } from "$lib/api/nodes/types";
   import { nodeGraph } from "$lib/api/nodes";
@@ -17,22 +17,16 @@
 
   let props: Props = $props();
 
-  // Reactive data state - poll from nodeGraph for real-time updates
+  // Use subscription-based updates instead of polling for better performance
   let liveData = $state<UtilityNodeData>(props.data);
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  onMount(() => {
-    // Poll for updates at 30fps for smooth display
-    updateInterval = setInterval(() => {
-      const node = nodeGraph.getNode(props.id);
-      if (node) {
-        liveData = node.data as UtilityNodeData;
-      }
-    }, 33);
+  // Subscribe to this specific node's updates
+  const unsubscribe = nodeGraph.subscribeToNode(props.id, (newData) => {
+    liveData = newData as UtilityNodeData;
   });
 
   onDestroy(() => {
-    if (updateInterval) clearInterval(updateInterval);
+    unsubscribe();
   });
 
   // Use live data for display
@@ -352,15 +346,22 @@
             oninput={(e) => {
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && (node.data.oscillatorConfig as any)) {
-                (node.data.oscillatorConfig as any).frequency = val;
+              if (node) {
+                if (node.data.oscillatorConfig) {
+                  node.data.oscillatorConfig.frequency = val;
+                }
+                if (node.data.inputValues) {
+                  node.data.inputValues.frequency = val;
+                }
               }
             }}
-            onchange={(e) =>
-              updateOscillatorConfig(
-                "frequency",
-                parseFloat((e.target as HTMLInputElement).value),
-              )}
+            onchange={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              updateData({
+                oscillatorConfig: { ...data.oscillatorConfig, frequency: val },
+                inputValues: { ...data.inputValues, frequency: val },
+              });
+            }}
           />
         </div>
       {/if}
@@ -377,15 +378,22 @@
             oninput={(e) => {
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && (node.data.oscillatorConfig as any)) {
-                (node.data.oscillatorConfig as any).phase = val;
+              if (node) {
+                if (node.data.oscillatorConfig) {
+                  node.data.oscillatorConfig.phase = val;
+                }
+                if (node.data.inputValues) {
+                  node.data.inputValues.phase = val;
+                }
               }
             }}
-            onchange={(e) =>
-              updateOscillatorConfig(
-                "phase",
-                parseFloat((e.target as HTMLInputElement).value),
-              )}
+            onchange={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              updateData({
+                oscillatorConfig: { ...data.oscillatorConfig, phase: val },
+                inputValues: { ...data.inputValues, phase: val },
+              });
+            }}
           />
         </div>
       {/if}
@@ -404,15 +412,22 @@
             oninput={(e) => {
               const val = parseFloat((e.target as HTMLInputElement).value);
               const node = nodeGraph.getNode(props.id);
-              if (node && (node.data.oscillatorConfig as any)) {
-                (node.data.oscillatorConfig as any).pulseWidth = val;
+              if (node) {
+                if (node.data.oscillatorConfig) {
+                  node.data.oscillatorConfig.pulseWidth = val;
+                }
+                if (node.data.inputValues) {
+                  node.data.inputValues.pulseWidth = val;
+                }
               }
             }}
-            onchange={(e) =>
-              updateOscillatorConfig(
-                "pulseWidth",
-                parseFloat((e.target as HTMLInputElement).value),
-              )}
+            onchange={(e) => {
+              const val = parseFloat((e.target as HTMLInputElement).value);
+              updateData({
+                oscillatorConfig: { ...data.oscillatorConfig, pulseWidth: val },
+                inputValues: { ...data.inputValues, pulseWidth: val },
+              });
+            }}
           />
         </div>
       {/if}

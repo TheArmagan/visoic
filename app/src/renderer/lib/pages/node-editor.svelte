@@ -110,6 +110,21 @@
   let pendingPositionUpdates = new Map<string, { x: number; y: number }>();
   let lastSyncTime = 0;
 
+  // Memoized node color function for MiniMap performance
+  const CATEGORY_COLORS: Record<string, string> = {
+    shader: "#8b5cf6",
+    math: "#22c55e",
+    value: "#3b82f6",
+    audio: "#f97316",
+    logic: "#ef4444",
+    utility: "#a3a3a3",
+    output: "#14b8a6",
+  };
+
+  function getNodeColor(node: { data: any }): string {
+    return CATEGORY_COLORS[node.data?.category] || "#525252";
+  }
+
   // Hooks
   const nodeOps = useNodeOperations();
   const edgeOps = useEdgeOperations();
@@ -117,9 +132,6 @@
 
   // Store cleanup function
   let statsInterval: ReturnType<typeof setInterval> | null = null;
-
-  // Force UI refresh counter - used to trigger reactive updates
-  let forceRefreshCounter = $state(0);
 
   // Initialize runtime
   onMount(() => {
@@ -143,15 +155,13 @@
       isRunning = true;
     });
 
-    // Update stats periodically - also forces UI reactivity for realtime values
+    // Update stats periodically - low frequency since it's just display
     statsInterval = setInterval(() => {
       if (nodeRuntime.running) {
         frameCount = nodeRuntime.currentFrame;
         currentTime = nodeRuntime.currentTime;
-        // Increment counter to trigger any derived computations
-        forceRefreshCounter++;
       }
-    }, 50); // 20fps for stats update
+    }, 200); // 5fps for stats display is sufficient
   });
 
   onDestroy(() => {
@@ -192,11 +202,19 @@
     }
   }
 
-  // Debounced graph sync function
+  // Debounced graph sync function - optimized to minimize object creation
   function syncNodesFromGraph(forceFullSync = false) {
+    // Skip sync entirely during interaction for maximum performance
+    if (isInteracting && !forceFullSync) return;
+
     const currentNodes = nodeGraph.getNodes();
-    // Ensure all node types are registered before updating state
-    syncNodeTypesWithRegistry(currentNodes.map((n) => n.type));
+
+    // Only sync node types if there are new nodes
+    const currentNodeTypes = currentNodes.map((n) => n.type);
+    const hasNewTypes = currentNodeTypes.some((t) => !(t in dynamicNodeTypes));
+    if (hasNewTypes) {
+      syncNodeTypesWithRegistry(currentNodeTypes);
+    }
 
     // Create map of current UI nodes to preserve selection/drag state
     const uiNodeMap = new Map(nodes.map((n) => [n.id, n]));
@@ -205,6 +223,13 @@
     const isStructuralChange =
       currentNodes.length !== nodes.length ||
       currentNodes.some((n) => !uiNodeMap.has(n.id));
+
+    // Skip node update if no structural change and not forced
+    if (!isStructuralChange && !forceFullSync) {
+      // Just check edges
+      syncEdgesIfNeeded(forceFullSync);
+      return;
+    }
 
     const newNodes = currentNodes.map((graphNode) => {
       const uiNode = uiNodeMap.get(graphNode.id);
@@ -242,10 +267,13 @@
       return graphNode;
     });
 
-    // Only update if there are actual changes
     nodes = newNodes;
+    syncEdgesIfNeeded(forceFullSync);
+    lastSyncTime = Date.now();
+  }
 
-    // Preserve edge selection state and add colors based on data type
+  // Separate edge sync function to avoid redundant work
+  function syncEdgesIfNeeded(forceFullSync: boolean) {
     const currentEdges = nodeGraph.getEdges();
     const uiEdgeMap = new Map(edges.map((e) => [e.id, e]));
 
@@ -272,29 +300,18 @@
         };
       });
     }
-
-    lastSyncTime = Date.now();
   }
 
-  // Subscribe to graph changes - debounced during interaction
+  // Subscribe to graph changes - heavily debounced for performance
   nodeGraph.subscribe(() => {
-    // Skip sync during active interaction (zoom/drag) to prevent preview freeze
-    if (isInteracting) {
-      // Schedule sync for after interaction ends
-      if (graphSyncTimer) clearTimeout(graphSyncTimer);
-      graphSyncTimer = setTimeout(() => {
-        if (!isInteracting) {
-          syncNodesFromGraph();
-        }
-      }, 100);
-      return;
-    }
+    // Skip sync entirely during active interaction
+    if (isInteracting) return;
 
-    // Debounce rapid updates
+    // Debounce rapid updates - 50ms is enough for structural changes
     if (graphSyncTimer) clearTimeout(graphSyncTimer);
     graphSyncTimer = setTimeout(() => {
       syncNodesFromGraph();
-    }, 16); // ~60fps
+    }, 50);
   });
 
   // Toggle runtime
@@ -917,40 +934,51 @@
       onmovestart={() => (isInteracting = true)}
       onmoveend={() => {
         isInteracting = false;
-        // Trigger sync after interaction ends
-        syncNodesFromGraph();
+        // Debounced sync after interaction ends
+        if (graphSyncTimer) clearTimeout(graphSyncTimer);
+        graphSyncTimer = setTimeout(() => {
+          syncNodesFromGraph();
+        }, 50);
       }}
       onedgeclick={(event) => {
-        // Toggle animation on clicked edge
+        // Only update the clicked edge, not all edges
         const clickedEdgeId = event.edge.id;
-        edges = edges.map((edge) => {
-          const isClicked = edge.id === clickedEdgeId;
-          const dataType = edge.data?.dataType || "any";
-          const typeInfo =
-            DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
-          const edgeColor = typeInfo?.color || "#888";
-          return {
-            ...edge,
-            selected: isClicked,
-            style: `stroke: ${edgeColor}; stroke-width: ${isClicked ? 3 : 2};`,
-            animated: isClicked,
-          };
-        });
+        const clickedEdge = edges.find((e) => e.id === clickedEdgeId);
+        if (clickedEdge && !clickedEdge.selected) {
+          edges = edges.map((edge) => {
+            const isClicked = edge.id === clickedEdgeId;
+            if (isClicked === edge.selected) return edge; // No change needed
+            const dataType = edge.data?.dataType || "any";
+            const typeInfo =
+              DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+            const edgeColor = typeInfo?.color || "#888";
+            return {
+              ...edge,
+              selected: isClicked,
+              style: `stroke: ${edgeColor}; stroke-width: ${isClicked ? 3 : 2};`,
+              animated: isClicked,
+            };
+          });
+        }
       }}
       onpaneclick={() => {
-        // Deselect all edges when clicking on pane
-        edges = edges.map((edge) => {
-          const dataType = edge.data?.dataType || "any";
-          const typeInfo =
-            DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
-          const edgeColor = typeInfo?.color || "#888";
-          return {
-            ...edge,
-            selected: false,
-            style: `stroke: ${edgeColor}; stroke-width: 2;`,
-            animated: false,
-          };
-        });
+        // Only update if there are selected edges
+        const hasSelectedEdges = edges.some((e) => e.selected);
+        if (hasSelectedEdges) {
+          edges = edges.map((edge) => {
+            if (!edge.selected) return edge; // No change needed
+            const dataType = edge.data?.dataType || "any";
+            const typeInfo =
+              DATA_TYPE_INFO[dataType as keyof typeof DATA_TYPE_INFO];
+            const edgeColor = typeInfo?.color || "#888";
+            return {
+              ...edge,
+              selected: false,
+              style: `stroke: ${edgeColor}; stroke-width: 2;`,
+              animated: false,
+            };
+          });
+        }
       }}
       onconnectend={onConnectEnd}
       onnodecontextmenu={(event) => {
@@ -977,27 +1005,7 @@
       />
       <MiniMap
         class="bg-neutral-900! border-neutral-700! rounded-lg!"
-        nodeColor={(node) => {
-          const category = (node.data as any)?.category;
-          switch (category) {
-            case "shader":
-              return "#8b5cf6";
-            case "math":
-              return "#22c55e";
-            case "value":
-              return "#3b82f6";
-            case "audio":
-              return "#f97316";
-            case "logic":
-              return "#ef4444";
-            case "utility":
-              return "#a3a3a3";
-            case "output":
-              return "#14b8a6";
-            default:
-              return "#525252";
-          }
-        }}
+        nodeColor={getNodeColor}
       />
     </SvelteFlow>
   </div>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onDestroy } from "svelte";
   import { useSvelteFlow } from "@xyflow/svelte";
   import type { ValueNodeData } from "$lib/api/nodes/types";
   import { nodeGraph } from "$lib/api/nodes";
@@ -16,22 +16,16 @@
 
   let props: Props = $props();
 
-  // Reactive data state - poll from nodeGraph for real-time updates
+  // Use subscription-based updates instead of polling for better performance
   let liveData = $state<ValueNodeData>(props.data);
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  onMount(() => {
-    // Poll for updates at 20fps
-    updateInterval = setInterval(() => {
-      const node = nodeGraph.getNode(props.id);
-      if (node) {
-        liveData = node.data as ValueNodeData;
-      }
-    }, 50);
+  // Subscribe to this specific node's updates
+  const unsubscribe = nodeGraph.subscribeToNode(props.id, (newData) => {
+    liveData = newData as ValueNodeData;
   });
 
   onDestroy(() => {
-    if (updateInterval) clearInterval(updateInterval);
+    unsubscribe();
   });
 
   const data = $derived(liveData);

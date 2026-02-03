@@ -166,6 +166,7 @@ export interface OutputHandle extends HandleDefinition {
 export type NodeCategory =
   | 'shader'
   | 'renderer'
+  | 'source'
   | 'math'
   | 'value'
   | 'audio'
@@ -192,6 +193,12 @@ export const NODE_CATEGORIES: Record<NodeCategory, NodeCategoryInfo> = {
     label: 'Renderer',
     color: '#ec4899',
     icon: '🖼️',
+  },
+  source: {
+    id: 'source',
+    label: 'Sources',
+    color: '#06b6d4',
+    icon: '📹',
   },
   math: {
     id: 'math',
@@ -483,11 +490,19 @@ export interface OutputNodeData extends BaseNodeData {
 }
 
 export interface MediaNodeData extends BaseNodeData {
-  category: 'value';
+  category: 'source';
   /** Media type */
-  mediaType: 'image' | 'video';
-  /** File path to the media */
+  mediaType: 'image' | 'video' | 'desktop' | 'camera';
+  /** File path to the media (for image/video) */
   filePath?: string;
+  /** Desktop/window source ID (for desktop capture) */
+  sourceId?: string;
+  /** Source display name (for desktop capture) */
+  sourceName?: string;
+  /** Camera device ID (for camera capture) */
+  deviceId?: string;
+  /** Camera device label (for camera capture) */
+  deviceLabel?: string;
   /** Video loop setting */
   loop?: boolean;
   /** Video playback speed (1.0 = normal) */
@@ -500,6 +515,8 @@ export interface MediaNodeData extends BaseNodeData {
   height?: number;
   /** Internal reference to the media element (not serialized) */
   _mediaElement?: HTMLImageElement | HTMLVideoElement;
+  /** Internal reference to the media stream (for desktop/camera) */
+  _mediaStream?: MediaStream;
 }
 
 export type AnyNodeData =
@@ -543,6 +560,8 @@ export interface NodeDefinition {
   inputs: InputHandle[];
   /** Output definitions */
   outputs: OutputHandle[];
+  /** ISF shader ID (for shader nodes loaded from ISF) */
+  isfId?: string;
 }
 
 // ============================================

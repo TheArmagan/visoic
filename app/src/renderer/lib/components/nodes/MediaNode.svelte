@@ -8,6 +8,7 @@
   import { Switch } from "$lib/components/ui/switch";
   import { RangeSlider } from "$lib/components/ui/range-slider";
   import { Button } from "$lib/components/ui/button";
+  import * as Select from "$lib/components/ui/select";
 
   interface Props {
     id: string;
@@ -29,15 +30,24 @@
         mimeType?: string;
         error?: string;
       }>;
+      getDesktopSources: () => Promise<{
+        success: boolean;
+        sources?: Array<{ id: string; name: string; thumbnail?: string }>;
+        error?: string;
+      }>;
     };
   };
 
   const nativeAPI = (window as unknown as { VISOICNative?: NativeAPI })
     .VISOICNative;
 
-  // Reactive data state - poll from nodeGraph for real-time updates
+  // Use subscription-based updates instead of polling for better performance
   let liveData = $state<MediaNodeData>(props.data);
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Subscribe to this specific node's updates
+  const unsubscribe = nodeGraph.subscribeToNode(props.id, (newData) => {
+    liveData = newData as MediaNodeData;
+  });
 
   // Preview canvas and video element
   let previewCanvas = $state<HTMLCanvasElement | null>(null);
@@ -46,29 +56,36 @@
   let blobUrl = $state<string | null>(null);
   let imageLoaded = $state(false);
   let videoLoaded = $state(false);
+  let captureActive = $state(false);
+  let mediaStream: MediaStream | null = null; // Local reference, not in node data
+
+  // Desktop sources list
+  let desktopSources = $state<
+    Array<{ id: string; name: string; thumbnail?: string }>
+  >([]);
+  let cameraDevices = $state<MediaDeviceInfo[]>([]);
 
   onMount(() => {
-    // Poll for updates at 20fps for smooth slider display
-    updateInterval = setInterval(() => {
-      const node = nodeGraph.getNode(props.id);
-      if (node) {
-        liveData = node.data as MediaNodeData;
-      }
-    }, 50);
-
-    // Initialize video element if this is a video source
+    // Initialize based on media type
     if (props.data.mediaType === "video" && props.data.filePath) {
       loadVideo(props.data.filePath);
-    }
-
-    // Initialize image element if this is an image source
-    if (props.data.mediaType === "image" && props.data.filePath) {
+    } else if (props.data.mediaType === "image" && props.data.filePath) {
       loadImage(props.data.filePath);
+    } else if (props.data.mediaType === "desktop") {
+      loadDesktopSources();
+      if (props.data.sourceId) {
+        startDesktopCapture(props.data.sourceId);
+      }
+    } else if (props.data.mediaType === "camera") {
+      loadCameraDevices();
+      if (props.data.deviceId) {
+        startCameraCapture(props.data.deviceId);
+      }
     }
   });
 
   onDestroy(() => {
-    if (updateInterval) clearInterval(updateInterval);
+    unsubscribe();
     if (videoElement) {
       videoElement.pause();
       videoElement.src = "";
@@ -77,6 +94,8 @@
     if (blobUrl) {
       URL.revokeObjectURL(blobUrl);
     }
+    // Stop media stream
+    stopCapture();
   });
 
   // Use live data for display
@@ -91,6 +110,8 @@
   }
 
   async function handleFileSelect() {
+    if (data.mediaType !== "image" && data.mediaType !== "video") return;
+
     try {
       const result = await nativeAPI?.media?.showOpenDialog({
         type: data.mediaType,
@@ -202,13 +223,133 @@
     }
   }
 
+  // Desktop capture functions
+  async function loadDesktopSources() {
+    try {
+      const result = await nativeAPI?.media?.getDesktopSources();
+      if (result?.success && result.sources) {
+        desktopSources = result.sources;
+      }
+    } catch (e) {
+      console.error("Failed to get desktop sources:", e);
+    }
+  }
+
+  async function startDesktopCapture(sourceId: string) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          // @ts-ignore - Electron specific constraint
+          mandatory: {
+            chromeMediaSource: "desktop",
+            chromeMediaSourceId: sourceId,
+          },
+        },
+      });
+
+      setupStreamCapture(stream);
+      updateSetting("sourceId", sourceId);
+
+      const source = desktopSources.find((s) => s.id === sourceId);
+      if (source) {
+        updateSetting("sourceName", source.name);
+      }
+    } catch (e) {
+      console.error("Failed to start desktop capture:", e);
+    }
+  }
+
+  // Camera capture functions
+  async function loadCameraDevices() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      cameraDevices = devices.filter((d) => d.kind === "videoinput");
+    } catch (e) {
+      console.error("Failed to enumerate devices:", e);
+    }
+  }
+
+  async function startCameraCapture(deviceId: string) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          deviceId: { exact: deviceId },
+        },
+      });
+
+      setupStreamCapture(stream);
+      updateSetting("deviceId", deviceId);
+
+      const device = cameraDevices.find((d) => d.deviceId === deviceId);
+      if (device) {
+        updateSetting("deviceLabel", device.label);
+      }
+    } catch (e) {
+      console.error("Failed to start camera capture:", e);
+    }
+  }
+
+  function setupStreamCapture(stream: MediaStream) {
+    // Stop any existing stream first
+    stopCapture();
+
+    mediaStream = stream; // Store locally
+
+    if (!videoElement) {
+      videoElement = document.createElement("video");
+      videoElement.playsInline = true;
+      videoElement.muted = true;
+    }
+
+    videoElement.srcObject = stream;
+    videoElement.play().catch(console.error);
+
+    videoElement.onloadedmetadata = () => {
+      updateSetting("width", videoElement!.videoWidth);
+      updateSetting("height", videoElement!.videoHeight);
+      updateSetting("_mediaElement", videoElement);
+      captureActive = true;
+      videoLoaded = true;
+    };
+
+    videoElement.ontimeupdate = () => {
+      updatePreview();
+    };
+
+    // Also update preview on each frame for live captures
+    const updateFrame = () => {
+      if (captureActive && videoElement) {
+        updatePreview();
+        requestAnimationFrame(updateFrame);
+      }
+    };
+    requestAnimationFrame(updateFrame);
+  }
+
+  function stopCapture() {
+    captureActive = false;
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+    }
+    if (videoElement) {
+      videoElement.srcObject = null;
+    }
+  }
+
   function updatePreview() {
     if (!previewCanvas) return;
 
     const ctx = previewCanvas.getContext("2d");
     if (!ctx) return;
 
-    const source = data.mediaType === "video" ? videoElement : imageElement;
+    // For desktop/camera, always use videoElement
+    const isCapture =
+      data.mediaType === "desktop" || data.mediaType === "camera";
+    const source =
+      isCapture || data.mediaType === "video" ? videoElement : imageElement;
     if (!source) return;
 
     const width =
@@ -297,34 +438,142 @@
   );
 
   const isVideo = $derived(data.mediaType === "video");
+  const isImage = $derived(data.mediaType === "image");
+  const isDesktop = $derived(data.mediaType === "desktop");
+  const isCamera = $derived(data.mediaType === "camera");
+  const isCapture = $derived(isDesktop || isCamera);
+
+  const mediaTypeLabel = $derived(() => {
+    switch (data.mediaType) {
+      case "video":
+        return "Video";
+      case "image":
+        return "Image";
+      case "desktop":
+        return "Desktop";
+      case "camera":
+        return "Camera";
+      default:
+        return "Media";
+    }
+  });
 </script>
 
 <BaseNode {...props}>
   {#snippet headerExtra()}
     <div class="flex items-center gap-1">
       <span
-        class="text-[9px] px-1.5 py-0.5 bg-teal-500/20 text-teal-300 rounded"
+        class="text-[9px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded"
       >
-        {isVideo ? "Video" : "Image"}
+        {mediaTypeLabel()}
       </span>
     </div>
   {/snippet}
 
   <div class="space-y-2">
-    <!-- File Selection -->
-    <div>
-      <Button
-        variant="outline"
-        size="sm"
-        onclick={handleFileSelect}
-        class="w-full h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
-      >
-        {fileName ?? (isVideo ? "Select Video..." : "Select Image...")}
-      </Button>
-    </div>
+    <!-- File Selection (for image/video) -->
+    {#if isImage || isVideo}
+      <div>
+        <Button
+          variant="outline"
+          size="sm"
+          onclick={handleFileSelect}
+          class="w-full h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+        >
+          {fileName ?? (isVideo ? "Select Video..." : "Select Image...")}
+        </Button>
+      </div>
+    {/if}
+
+    <!-- Desktop Source Selection -->
+    {#if isDesktop}
+      <div class="space-y-1">
+        <div class="flex gap-1">
+          <Select.Root
+            type="single"
+            value={data.sourceId}
+            onValueChange={(v) => startDesktopCapture(v)}
+          >
+            <Select.Trigger
+              class="flex-1 h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            >
+              {data.sourceName ?? "Select Source..."}
+            </Select.Trigger>
+            <Select.Content>
+              {#each desktopSources as source}
+                <Select.Item value={source.id}>{source.name}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={loadDesktopSources}
+            class="h-7 px-2 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          >
+            ↻
+          </Button>
+        </div>
+        {#if captureActive}
+          <Button
+            variant="destructive"
+            size="sm"
+            onclick={stopCapture}
+            class="w-full h-6 text-xs nodrag"
+          >
+            Stop Capture
+          </Button>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- Camera Selection -->
+    {#if isCamera}
+      <div class="space-y-1">
+        <div class="flex gap-1">
+          <Select.Root
+            type="single"
+            value={data.deviceId}
+            onValueChange={(v) => startCameraCapture(v)}
+          >
+            <Select.Trigger
+              class="flex-1 h-7 text-xs bg-neutral-800 border-neutral-700 nodrag"
+            >
+              {data.deviceLabel ?? "Select Camera..."}
+            </Select.Trigger>
+            <Select.Content>
+              {#each cameraDevices as device}
+                <Select.Item value={device.deviceId}
+                  >{device.label ||
+                    `Camera ${device.deviceId.slice(0, 8)}`}</Select.Item
+                >
+              {/each}
+            </Select.Content>
+          </Select.Root>
+          <Button
+            variant="outline"
+            size="sm"
+            onclick={loadCameraDevices}
+            class="h-7 px-2 text-xs bg-neutral-800 border-neutral-700 nodrag"
+          >
+            ↻
+          </Button>
+        </div>
+        {#if captureActive}
+          <Button
+            variant="destructive"
+            size="sm"
+            onclick={stopCapture}
+            class="w-full h-6 text-xs nodrag"
+          >
+            Stop Capture
+          </Button>
+        {/if}
+      </div>
+    {/if}
 
     <!-- Preview -->
-    {#if data.filePath}
+    {#if data.filePath || captureActive}
       <div class="relative">
         <canvas
           bind:this={previewCanvas}

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, screen, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, screen, dialog, shell, desktopCapturer } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
@@ -269,6 +269,29 @@ function createWindow() {
       };
     } catch (error) {
       console.error('Failed to read media file:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  // Get desktop capture sources (screens and windows)
+  ipcMain.handle('media:getDesktopSources', async () => {
+    try {
+      
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 160, height: 90 }
+      });
+
+      return {
+        success: true,
+        sources: sources.map(source => ({
+          id: source.id,
+          name: source.name,
+          thumbnail: source.thumbnail.toDataURL()
+        }))
+      };
+    } catch (error) {
+      console.error('Failed to get desktop sources:', error);
       return { success: false, error: String(error) };
     }
   });

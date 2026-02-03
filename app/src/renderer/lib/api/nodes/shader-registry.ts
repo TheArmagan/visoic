@@ -261,6 +261,7 @@ function registerISFShaderNode(
     description: metadata?.DESCRIPTION ?? `${info.name} ISF shader`,
     category: 'shader',
     icon: '🎨',
+    isfId: info.id, // Store ISF shader ID for validation filtering
     tags: [
       'shader',
       'isf',

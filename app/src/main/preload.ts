@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld('VISOICNative', {
       ipcRenderer.invoke('media:showOpenDialog', options),
     readFile: (filePath: string): Promise<{ success: boolean; data?: ArrayBuffer; mimeType?: string; error?: string }> =>
       ipcRenderer.invoke('media:readFile', filePath),
+    getDesktopSources: (): Promise<{ success: boolean; sources?: Array<{ id: string; name: string; thumbnail?: string }>; error?: string }> =>
+      ipcRenderer.invoke('media:getDesktopSources'),
   },
   // Shader Test Suite API
   shaderTest: {

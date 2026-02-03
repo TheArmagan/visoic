@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { Input } from "$lib/components/ui/input";
   import { nodeRegistry } from "$lib/api/nodes/registry";
+  import { isfLoader } from "$lib/api/shader";
   import {
     NODE_CATEGORIES,
     type NodeCategory,
@@ -22,10 +24,56 @@
   let expandedCategories = $state<Set<string>>(new Set(["shader"]));
   let expandedSubcategories = $state<Set<string>>(new Set());
 
+  // Track invalid shader IDs for filtering
+  let invalidShaderIds = $state<Set<string>>(new Set());
+  let validationStarted = $state(false);
+
+  // Start validation when component mounts
+  onMount(() => {
+    if (!validationStarted && isfLoader.isAvailable()) {
+      validationStarted = true;
+      // Start validation in background
+      isfLoader
+        .validateAllShaders((current, total, shaderId) => {
+          // Update invalid shaders as validation progresses
+          if (isfLoader.isShaderInvalid(shaderId)) {
+            invalidShaderIds = new Set([...invalidShaderIds, shaderId]);
+          }
+        })
+        .then((result) => {
+          // Final update with all invalid shaders
+          invalidShaderIds = new Set(result.invalid.map((s) => s.id));
+          console.log(
+            `[NodeSearchPopup] Shader validation complete: ${result.valid.length} valid, ${result.invalid.length} invalid`,
+          );
+        });
+    }
+  });
+
   const allNodes = $derived(nodeRegistry.getAll());
 
+  // Filter out invalid ISF shaders from node list
+  const validNodes = $derived(() => {
+    return allNodes.filter((node) => {
+      // Only filter ISF shader nodes that have an isfId
+      if (node.isfId && invalidShaderIds.has(node.isfId)) {
+        return false;
+      }
+      return true;
+    });
+  });
+
   const filteredNodes = $derived(
-    searchQuery.trim() ? nodeRegistry.search(searchQuery) : allNodes,
+    searchQuery.trim()
+      ? validNodes().filter(
+          (n) =>
+            n.label.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            n.type.toLowerCase().includes(searchQuery.toLowerCase()) ||
+            n.tags?.some((t) =>
+              t.toLowerCase().includes(searchQuery.toLowerCase()),
+            ),
+        )
+      : validNodes(),
   );
 
   // Group nodes by category and subcategory

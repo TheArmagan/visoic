@@ -494,6 +494,36 @@ class NodeGraphManager {
   // Graph Evaluation
   // ============================================
 
+  // Track last UI notification time for throttling
+  private lastUINotifyTime = 0;
+  private pendingUINotifications: Set<string> = new Set();
+  private uiNotifyScheduled = false;
+
+  // Throttled UI notification - batches updates every 100ms (10fps for UI)
+  private scheduleUINotification(nodeId: string): void {
+    this.pendingUINotifications.add(nodeId);
+
+    if (!this.uiNotifyScheduled) {
+      this.uiNotifyScheduled = true;
+      // Use setTimeout instead of requestAnimationFrame for more control
+      setTimeout(() => {
+        this.flushUINotifications();
+      }, 100); // 10fps for UI updates is sufficient
+    }
+  }
+
+  private flushUINotifications(): void {
+    this.uiNotifyScheduled = false;
+    for (const nodeId of this.pendingUINotifications) {
+      const node = this.nodes.get(nodeId);
+      if (node) {
+        this.notifyNodeListeners(nodeId, node.data);
+      }
+    }
+    this.pendingUINotifications.clear();
+    this.lastUINotifyTime = Date.now();
+  }
+
   evaluate(context: EvaluationContext): void {
     if (this.isDirty) {
       this.evaluationOrder = this.computeEvaluationOrder();
@@ -512,11 +542,15 @@ class NodeGraphManager {
         const result = this.evaluateNode(node, context);
         this.nodeOutputCache.set(nodeId, result.outputs);
 
-        // Update node's output values in place (no UI notification during hot loop)
-        // UI components use subscribeToNode for their own updates
+        // Update node's output values in place
         node.data.outputValues = result.outputs;
         node.data.hasError = false;
         node.data.errorMessage = undefined;
+
+        // Schedule throttled UI notification if there are listeners
+        if (this.nodeListeners.has(nodeId)) {
+          this.scheduleUINotification(nodeId);
+        }
       } catch (error) {
         console.error(`Error evaluating node ${nodeId}:`, error);
         node.data.hasError = true;
@@ -847,10 +881,11 @@ class NodeGraphManager {
       }
 
       case 'oscillator': {
-        const frequency = Number(inputs.frequency ?? 1);
-        const amplitude = Number(inputs.amplitude ?? 1);
-        const offset = Number(inputs.offset ?? 0);
-        const phase = Number(inputs.phase ?? 0);
+        // Use oscillatorConfig values as defaults, inputs can override when connected
+        const frequency = Number(inputs.frequency ?? data.oscillatorConfig?.frequency ?? 1);
+        const amplitude = Number(inputs.amplitude ?? data.oscillatorConfig?.amplitude ?? 1);
+        const offset = Number(inputs.offset ?? data.oscillatorConfig?.offset ?? 0);
+        const phase = Number(inputs.phase ?? data.oscillatorConfig?.phase ?? 0);
         const waveform = data.oscillatorConfig?.waveform ?? 'sine';
 
         const t = (context.time * frequency + phase) % 1;

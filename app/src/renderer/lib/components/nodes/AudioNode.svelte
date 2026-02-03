@@ -17,22 +17,16 @@
 
   let props: Props = $props();
 
-  // Reactive data state - poll from nodeGraph for real-time updates (especially outputValues)
+  // Use subscription-based updates instead of polling for better performance
   let liveData = $state<AudioNodeData>(props.data);
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  onMount(() => {
-    // Poll for updates at 30fps for smooth audio visualization
-    updateInterval = setInterval(() => {
-      const node = nodeGraph.getNode(props.id);
-      if (node) {
-        liveData = node.data as AudioNodeData;
-      }
-    }, 33);
+  // Subscribe to this specific node's updates
+  const unsubscribe = nodeGraph.subscribeToNode(props.id, (newData) => {
+    liveData = newData as AudioNodeData;
   });
 
   onDestroy(() => {
-    if (updateInterval) clearInterval(updateInterval);
+    unsubscribe();
   });
 
   // Use live data for display

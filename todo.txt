@@ -1,0 +1,8 @@
+Visoic todo
+OSC - port/in/out nodeları
+Gamepad in nodu
+Mediapipe ilerisi için 
+ThreeJS ile 3d envoriment nodeları 
+Render Context ismini Shader Render Context yap
+3D Render Context ekle (threejs)
+2D Canvas Render Context ekle

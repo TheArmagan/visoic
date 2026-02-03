@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onDestroy } from "svelte";
   import { useSvelteFlow, useEdges } from "@xyflow/svelte";
   import type { LogicNodeData, DataType } from "$lib/api/nodes/types";
   import { DATA_TYPE_INFO } from "$lib/api/nodes/types";
@@ -18,22 +18,16 @@
 
   let props: Props = $props();
 
-  // Reactive data state - poll from nodeGraph for real-time updates
+  // Use subscription-based updates instead of polling for better performance
   let liveData = $state<LogicNodeData>(props.data);
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
 
-  onMount(() => {
-    // Poll for updates at 30fps
-    updateInterval = setInterval(() => {
-      const node = nodeGraph.getNode(props.id);
-      if (node) {
-        liveData = node.data as LogicNodeData;
-      }
-    }, 33);
+  // Subscribe to this specific node's updates
+  const unsubscribe = nodeGraph.subscribeToNode(props.id, (newData) => {
+    liveData = newData as LogicNodeData;
   });
 
   onDestroy(() => {
-    if (updateInterval) clearInterval(updateInterval);
+    unsubscribe();
   });
 
   // Use live data for display

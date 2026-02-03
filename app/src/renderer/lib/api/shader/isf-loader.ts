@@ -2,6 +2,8 @@
 // Visoic Shader API - ISF Loader
 // ============================================
 
+import { ISFParser } from './isf-parser';
+
 /**
  * ISF Shader metadata
  */
@@ -18,6 +20,15 @@ export interface ISFShaderInfo {
 export interface ISFShaderSource {
   fragment: string;
   vertex: string | null;
+}
+
+/**
+ * Shader validation result
+ */
+export interface ShaderValidationResult {
+  shaderId: string;
+  valid: boolean;
+  error?: string;
 }
 
 /**
@@ -46,6 +57,15 @@ class ISFLoader {
   private cache: Map<string, ISFShaderSource> = new Map();
   private shaderList: ISFShaderInfo[] | null = null;
   private categories: string[] | null = null;
+
+  // Validation state
+  private validatedShaders: Set<string> = new Set();
+  private invalidShaders: Set<string> = new Set();
+  private validationErrors: Map<string, string> = new Map();
+  private validationInProgress = false;
+  private validationPromise: Promise<void> | null = null;
+  private gpuDevice: GPUDevice | null = null;
+  private parser: ISFParser = new ISFParser();
 
   /**
    * Check if native API is available
@@ -168,6 +188,214 @@ class ISFLoader {
   async preloadCategory(category: string): Promise<void> {
     const shaders = await this.getShadersByCategory(category);
     await Promise.all(shaders.map(s => this.loadShader(s.id)));
+  }
+
+  /**
+   * Initialize WebGPU device for validation
+   */
+  private async initGPU(): Promise<GPUDevice | null> {
+    if (this.gpuDevice) return this.gpuDevice;
+
+    try {
+      const adapter = await navigator.gpu?.requestAdapter();
+      if (adapter) {
+        this.gpuDevice = await adapter.requestDevice();
+      }
+    } catch (e) {
+      console.warn('[ISFLoader] Failed to initialize WebGPU for validation:', e);
+    }
+    return this.gpuDevice;
+  }
+
+  /**
+   * Validate a single shader (parse + WebGPU compilation)
+   */
+  async validateShader(id: string): Promise<ShaderValidationResult> {
+    // Check if already validated
+    if (this.validatedShaders.has(id)) {
+      return { shaderId: id, valid: true };
+    }
+    if (this.invalidShaders.has(id)) {
+      return { shaderId: id, valid: false, error: this.validationErrors.get(id) };
+    }
+
+    const source = await this.loadShader(id);
+    if (!source) {
+      const error = 'Failed to load shader source';
+      this.invalidShaders.add(id);
+      this.validationErrors.set(id, error);
+      return { shaderId: id, valid: false, error };
+    }
+
+    try {
+      // Parse and convert to WGSL
+      const compileResult = this.parser.parse(source.fragment, source.vertex || undefined);
+
+      if (!compileResult.success) {
+        const error = compileResult.error || 'Unknown compile error';
+        this.invalidShaders.add(id);
+        this.validationErrors.set(id, error);
+        return { shaderId: id, valid: false, error };
+      }
+
+      // Try WebGPU compilation if available
+      const device = await this.initGPU();
+      if (device && compileResult.fragmentShader) {
+        try {
+          const module = device.createShaderModule({
+            code: compileResult.fragmentShader,
+          });
+
+          const info = await module.getCompilationInfo();
+          const errors = info.messages.filter((m) => m.type === 'error');
+
+          if (errors.length > 0) {
+            const error = errors.map((e) => e.message).join('\n');
+            this.invalidShaders.add(id);
+            this.validationErrors.set(id, error);
+            return { shaderId: id, valid: false, error };
+          }
+        } catch (e: unknown) {
+          const error = e instanceof Error ? e.message : String(e);
+          this.invalidShaders.add(id);
+          this.validationErrors.set(id, error);
+          return { shaderId: id, valid: false, error };
+        }
+      }
+
+      // Shader is valid
+      this.validatedShaders.add(id);
+      return { shaderId: id, valid: true };
+    } catch (e: unknown) {
+      const error = e instanceof Error ? e.message : String(e);
+      this.invalidShaders.add(id);
+      this.validationErrors.set(id, error);
+      return { shaderId: id, valid: false, error };
+    }
+  }
+
+  /**
+   * Validate all shaders asynchronously
+   * @param onProgress Optional callback for progress updates
+   */
+  async validateAllShaders(onProgress?: (current: number, total: number, shaderId: string) => void): Promise<{
+    valid: string[];
+    invalid: Array<{ id: string; error: string }>;
+  }> {
+    // Prevent multiple simultaneous validations
+    if (this.validationPromise) {
+      await this.validationPromise;
+      return {
+        valid: [...this.validatedShaders],
+        invalid: [...this.invalidShaders].map(id => ({ id, error: this.validationErrors.get(id) || 'Unknown error' })),
+      };
+    }
+
+    this.validationInProgress = true;
+
+    this.validationPromise = (async () => {
+      const shaders = await this.getAllShaders();
+      console.log(`[ISFLoader] Validating ${shaders.length} shaders...`);
+
+      for (let i = 0; i < shaders.length; i++) {
+        const shader = shaders[i];
+
+        // Skip if already validated
+        if (this.validatedShaders.has(shader.id) || this.invalidShaders.has(shader.id)) {
+          onProgress?.(i + 1, shaders.length, shader.id);
+          continue;
+        }
+
+        await this.validateShader(shader.id);
+        onProgress?.(i + 1, shaders.length, shader.id);
+
+        // Small yield to prevent UI blocking
+        if (i % 10 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      }
+
+      console.log(`[ISFLoader] Validation complete: ${this.validatedShaders.size} valid, ${this.invalidShaders.size} invalid`);
+      this.validationInProgress = false;
+    })();
+
+    await this.validationPromise;
+    this.validationPromise = null;
+
+    return {
+      valid: [...this.validatedShaders],
+      invalid: [...this.invalidShaders].map(id => ({ id, error: this.validationErrors.get(id) || 'Unknown error' })),
+    };
+  }
+
+  /**
+   * Check if a shader is valid (returns false if not yet validated)
+   */
+  isShaderValid(id: string): boolean {
+    return this.validatedShaders.has(id);
+  }
+
+  /**
+   * Check if a shader is invalid
+   */
+  isShaderInvalid(id: string): boolean {
+    return this.invalidShaders.has(id);
+  }
+
+  /**
+   * Check if validation is in progress
+   */
+  isValidating(): boolean {
+    return this.validationInProgress;
+  }
+
+  /**
+   * Check if all shaders have been validated
+   */
+  isValidationComplete(): boolean {
+    if (!this.shaderList) return false;
+    return (this.validatedShaders.size + this.invalidShaders.size) >= this.shaderList.length;
+  }
+
+  /**
+   * Get only valid shaders (for node search)
+   */
+  async getValidShaders(): Promise<ISFShaderInfo[]> {
+    const all = await this.getAllShaders();
+
+    // If validation hasn't started or completed, return all
+    if (!this.isValidationComplete() && !this.validationInProgress) {
+      return all;
+    }
+
+    // Filter to only valid shaders
+    return all.filter(s => !this.invalidShaders.has(s.id));
+  }
+
+  /**
+   * Get invalid shaders with their errors
+   */
+  getInvalidShaders(): Array<{ id: string; error: string }> {
+    return [...this.invalidShaders].map(id => ({
+      id,
+      error: this.validationErrors.get(id) || 'Unknown error',
+    }));
+  }
+
+  /**
+   * Get validation error for a specific shader
+   */
+  getValidationError(id: string): string | undefined {
+    return this.validationErrors.get(id);
+  }
+
+  /**
+   * Reset validation state (useful for re-validation)
+   */
+  resetValidation(): void {
+    this.validatedShaders.clear();
+    this.invalidShaders.clear();
+    this.validationErrors.clear();
   }
 }
 

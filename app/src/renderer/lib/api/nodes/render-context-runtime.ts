@@ -705,7 +705,7 @@ class RenderContextRuntime {
 
   /**
    * Update media node outputs and pass textures to shader inputs
-   * This handles Image Source and Video Source nodes
+   * This handles Image Source, Video Source, Desktop Capture, and Camera Capture nodes
    */
   private updateMediaNodeOutputs(): void {
     const nodes = nodeGraph.getNodes();
@@ -713,7 +713,7 @@ class RenderContextRuntime {
 
     // Find all media nodes
     const mediaNodes = nodes.filter(
-      (n) => n.type === 'media:image' || n.type === 'media:video'
+      (n) => n.type === 'media:image' || n.type === 'media:video' || n.type === 'media:desktop' || n.type === 'media:camera'
     );
 
     for (const mediaNode of mediaNodes) {
@@ -731,41 +731,44 @@ class RenderContextRuntime {
           width = mediaElement.videoWidth;
           height = mediaElement.videoHeight;
 
-          // Check if there's a node connection to the speed input
-          const speedEdge = edges.find(
-            (e) => e.target === mediaNode.id && e.targetHandle === 'speed'
-          );
+          // Video-specific settings (only for media:video, not desktop/camera)
+          if (mediaNode.type === 'media:video') {
+            // Check if there's a node connection to the speed input
+            const speedEdge = edges.find(
+              (e) => e.target === mediaNode.id && e.targetHandle === 'speed'
+            );
 
-          // Update video settings
-          const loopInput = data.inputValues?.loop ?? data.loop;
-          const resetInput = data.inputValues?.reset;
+            // Update video settings
+            const loopInput = data.inputValues?.loop ?? data.loop;
+            const resetInput = data.inputValues?.reset;
 
-          if (loopInput !== undefined) {
-            mediaElement.loop = Boolean(loopInput);
-          }
+            if (loopInput !== undefined) {
+              mediaElement.loop = Boolean(loopInput);
+            }
 
-          // Only apply speed from inputValues if there's an actual node connection
-          // Otherwise, let the UI slider control playbackRate directly
-          if (speedEdge) {
-            const speedInput = data.inputValues?.speed;
-            if (speedInput !== undefined && !isNaN(Number(speedInput))) {
-              const newSpeed = Math.max(0.1, Math.min(4, Number(speedInput)));
-              if (mediaElement.playbackRate !== newSpeed) {
-                mediaElement.playbackRate = newSpeed;
+            // Only apply speed from inputValues if there's an actual node connection
+            // Otherwise, let the UI slider control playbackRate directly
+            if (speedEdge) {
+              const speedInput = data.inputValues?.speed;
+              if (speedInput !== undefined && !isNaN(Number(speedInput))) {
+                const newSpeed = Math.max(0.1, Math.min(4, Number(speedInput)));
+                if (mediaElement.playbackRate !== newSpeed) {
+                  mediaElement.playbackRate = newSpeed;
+                }
               }
             }
-          }
 
-          // Handle reset - when reset becomes true, seek to beginning and reset the flag
-          if (resetInput === true) {
-            mediaElement.currentTime = 0;
-            if (mediaElement.paused) {
-              mediaElement.play().catch(() => { });
+            // Handle reset - when reset becomes true, seek to beginning and reset the flag
+            if (resetInput === true) {
+              mediaElement.currentTime = 0;
+              if (mediaElement.paused) {
+                mediaElement.play().catch(() => { });
+              }
+              // Reset the flag back to false
+              nodeGraph.updateNodeDataSilent(mediaNode.id, {
+                inputValues: { ...data.inputValues, reset: false },
+              });
             }
-            // Reset the flag back to false
-            nodeGraph.updateNodeDataSilent(mediaNode.id, {
-              inputValues: { ...data.inputValues, reset: false },
-            });
           }
         } else if (mediaElement instanceof HTMLImageElement) {
           width = mediaElement.naturalWidth;

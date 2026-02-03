@@ -204,14 +204,14 @@ nodeRegistry.register({
 });
 
 // ============================================
-// Media Nodes
+// Source Nodes (Media Sources)
 // ============================================
 
 nodeRegistry.register({
   type: 'media:image',
   label: 'Image Source',
   description: 'Load an image file as a texture source for shaders',
-  category: 'value',
+  category: 'source',
   icon: '🖼️',
   tags: ['image', 'picture', 'texture', 'source', 'file', 'media'],
   inputs: [],
@@ -222,7 +222,7 @@ nodeRegistry.register({
   ],
   createDefaultData: () => ({
     label: 'Image Source',
-    category: 'value' as const,
+    category: 'source' as const,
     mediaType: 'image' as const,
     filePath: undefined,
     width: undefined,
@@ -242,7 +242,7 @@ nodeRegistry.register({
   type: 'media:video',
   label: 'Video Source',
   description: 'Load a video file as a texture source for shaders with playback controls',
-  category: 'value',
+  category: 'source',
   icon: '🎬',
   tags: ['video', 'movie', 'texture', 'source', 'file', 'media', 'playback'],
   inputs: [
@@ -257,7 +257,7 @@ nodeRegistry.register({
   ],
   createDefaultData: () => ({
     label: 'Video Source',
-    category: 'value' as const,
+    category: 'source' as const,
     mediaType: 'video' as const,
     filePath: undefined,
     loop: true,
@@ -276,6 +276,70 @@ nodeRegistry.register({
       { type: 'output' as const, id: 'height', label: 'Height', dataType: 'number' as const },
     ],
     inputValues: { loop: true, speed: 1, reset: false },
+    outputValues: { image: null, width: 0, height: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'media:desktop',
+  label: 'Desktop Capture',
+  description: 'Capture desktop screen or window as a texture source',
+  category: 'source',
+  icon: '🖥️',
+  tags: ['desktop', 'screen', 'capture', 'window', 'monitor', 'source'],
+  inputs: [],
+  outputs: [
+    { type: 'output', id: 'image', label: 'Screen', dataType: 'image' },
+    { type: 'output', id: 'width', label: 'Width', dataType: 'number' },
+    { type: 'output', id: 'height', label: 'Height', dataType: 'number' },
+  ],
+  createDefaultData: () => ({
+    label: 'Desktop Capture',
+    category: 'source' as const,
+    mediaType: 'desktop' as const,
+    sourceId: undefined,
+    sourceName: undefined,
+    width: undefined,
+    height: undefined,
+    inputs: [],
+    outputs: [
+      { type: 'output' as const, id: 'image', label: 'Screen', dataType: 'image' as const },
+      { type: 'output' as const, id: 'width', label: 'Width', dataType: 'number' as const },
+      { type: 'output' as const, id: 'height', label: 'Height', dataType: 'number' as const },
+    ],
+    inputValues: {},
+    outputValues: { image: null, width: 0, height: 0 },
+  }),
+});
+
+nodeRegistry.register({
+  type: 'media:camera',
+  label: 'Camera Capture',
+  description: 'Capture video from a camera/webcam as a texture source',
+  category: 'source',
+  icon: '📷',
+  tags: ['camera', 'webcam', 'capture', 'video', 'source'],
+  inputs: [],
+  outputs: [
+    { type: 'output', id: 'image', label: 'Camera', dataType: 'image' },
+    { type: 'output', id: 'width', label: 'Width', dataType: 'number' },
+    { type: 'output', id: 'height', label: 'Height', dataType: 'number' },
+  ],
+  createDefaultData: () => ({
+    label: 'Camera Capture',
+    category: 'source' as const,
+    mediaType: 'camera' as const,
+    deviceId: undefined,
+    deviceLabel: undefined,
+    width: undefined,
+    height: undefined,
+    inputs: [],
+    outputs: [
+      { type: 'output' as const, id: 'image', label: 'Camera', dataType: 'image' as const },
+      { type: 'output' as const, id: 'width', label: 'Width', dataType: 'number' as const },
+      { type: 'output' as const, id: 'height', label: 'Height', dataType: 'number' as const },
+    ],
+    inputValues: {},
     outputValues: { image: null, width: 0, height: 0 },
   }),
 });
